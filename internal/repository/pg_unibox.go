@@ -436,11 +436,16 @@ func (r *uniboxRepository) UpdateEntry(ctx context.Context, userID, emailID, id 
 }
 
 func (r *uniboxRepository) GetIncoming(ctx context.Context, userID uuid.UUID, limit int, cursor string) (*models.MailSearchResult, error) {
+	previewCols := make([]string, len(mailFieldsPreview))
+	for i, c := range mailFieldsPreview {
+		previewCols[i] = "ue." + c
+	}
 	query := fmt.Sprintf(`
 		SELECT %s
-		FROM unibox_emails
-		WHERE user_id = $1
-	`, strings.Join(mailFieldsPreview, ", "))
+		FROM unibox_emails ue
+		WHERE ue.user_id = $1
+	`, strings.Join(previewCols, ", "))
+	query += uniboxHideExternalSentSQL("ue")
 
 	args := []any{userID}
 	argPos := 2
@@ -449,7 +454,7 @@ func (r *uniboxRepository) GetIncoming(ctx context.Context, userID uuid.UUID, li
 		cursorID, err := uuid.Parse(cursor)
 		if err == nil {
 			query += fmt.Sprintf(`
-				AND (internal_date, id) < (
+				AND (ue.internal_date, ue.id) < (
 					SELECT internal_date, id FROM unibox_emails WHERE id = $%d AND user_id = $1
 				)`, argPos)
 			args = append(args, cursorID)
@@ -457,7 +462,7 @@ func (r *uniboxRepository) GetIncoming(ctx context.Context, userID uuid.UUID, li
 		}
 	}
 
-	query += fmt.Sprintf(` ORDER BY internal_date DESC, id DESC LIMIT $%d`, argPos)
+	query += fmt.Sprintf(` ORDER BY ue.internal_date DESC, ue.id DESC LIMIT $%d`, argPos)
 	args = append(args, limit+1)
 
 	return r.queryPreviewList(ctx, query, args, limit)
@@ -563,23 +568,28 @@ func (r *uniboxRepository) GetByThread(ctx context.Context, orgID, emailID uuid.
 }
 
 func (r *uniboxRepository) GetByThreadWithin(ctx context.Context, orgID, emailID uuid.UUID, threadID string, limit int, cursor string, allowed []uuid.UUID) (*models.MailSearchResult, error) {
+	previewCols := make([]string, len(mailFieldsPreview))
+	for i, c := range mailFieldsPreview {
+		previewCols[i] = "ue." + c
+	}
 	query := fmt.Sprintf(`
 		SELECT %s
-		FROM unibox_emails
-		WHERE email_id IN (SELECT id FROM email_accounts WHERE organization_id = $1)
-		  AND thread_id = $2
-	`, strings.Join(mailFieldsPreview, ", "))
+		FROM unibox_emails ue
+		WHERE ue.email_id IN (SELECT id FROM email_accounts WHERE organization_id = $1)
+		  AND ue.thread_id = $2
+	`, strings.Join(previewCols, ", "))
+	query += uniboxHideExternalSentSQL("ue")
 
 	args := []any{orgID, threadID}
 	argPos := 3
 
 	if emailID != uuid.Nil {
-		query += fmt.Sprintf(` AND email_id = $%d`, argPos)
+		query += fmt.Sprintf(` AND ue.email_id = $%d`, argPos)
 		args = append(args, emailID)
 		argPos++
 	}
 	if allowed != nil {
-		query += fmt.Sprintf(` AND email_id = ANY($%d::uuid[])`, argPos)
+		query += fmt.Sprintf(` AND ue.email_id = ANY($%d::uuid[])`, argPos)
 		args = append(args, allowed)
 		argPos++
 	}
@@ -588,7 +598,7 @@ func (r *uniboxRepository) GetByThreadWithin(ctx context.Context, orgID, emailID
 		cursorID, err := uuid.Parse(cursor)
 		if err == nil {
 			query += fmt.Sprintf(`
-				AND (internal_date, id) > (
+				AND (ue.internal_date, ue.id) > (
 					SELECT internal_date, id FROM unibox_emails
 					WHERE id = $%d AND email_id IN (SELECT id FROM email_accounts WHERE organization_id = $1)
 				)`, argPos)
@@ -599,7 +609,7 @@ func (r *uniboxRepository) GetByThreadWithin(ctx context.Context, orgID, emailID
 
 	// Thread display reads oldest-first so each reply renders below the
 	// message it replied to.
-	query += fmt.Sprintf(` ORDER BY internal_date ASC, id ASC LIMIT $%d`, argPos)
+	query += fmt.Sprintf(` ORDER BY ue.internal_date ASC, ue.id ASC LIMIT $%d`, argPos)
 	args = append(args, limit+1)
 
 	res, err := r.queryPreviewList(ctx, query, args, limit)
@@ -755,6 +765,7 @@ func uniboxSearchQuery(orgID uuid.UUID, params *models.MailSearchParams) (string
 	default:
 		inner += ` AND ue.folder NOT IN ` + foldersOutsideWorkingViews
 	}
+	inner += uniboxHideExternalSentSQL("ue")
 
 	// Snooze handling. nil = exclude snoozed (the inbox default), so
 	// threads with an active snooze never appear unless asked for.
@@ -1890,6 +1901,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 			FROM unibox_emails e
 			WHERE e.email_id IN `+mailboxes+`
 			  AND e.folder NOT IN `+foldersOutsideAllMail+`
+			`+uniboxHideExternalSentSQL("e")+`
 		),
 		threads AS (
 			SELECT
@@ -1958,6 +1970,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 			  AND s.snoozed_until > NOW()
 		  )
 		  AND NOT (e.folder = 'inbox' AND `+automatedThreadSQL("e.thread_id", "e.automated", "$1")+`)
+		`+uniboxHideExternalSentSQL("e")+`
 		GROUP BY e.folder
 	`, orgID)
 	if err != nil {
@@ -2001,6 +2014,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 		LEFT JOIN unibox_emails ue ON ue.email_id = ea.id AND ue.user_id = ea.user_id
 			AND ue.folder NOT IN `+foldersOutsideWorkingViews+`
 			AND NOT `+automatedThreadSQL("ue.thread_id", "ue.automated", "$1")+`
+			`+uniboxHideExternalSentSQL("ue")+`
 		WHERE ea.organization_id = $1`+onlyMailboxes("ea.id")+`
 		GROUP BY ea.id, ea.email, ea.name
 		ORDER BY ea.email ASC
@@ -2049,6 +2063,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 		LEFT JOIN unibox_emails ue ON ue.email_id = ea.id
 			AND ue.folder NOT IN `+foldersOutsideWorkingViews+`
 			AND NOT `+automatedThreadSQL("ue.thread_id", "ue.automated", "$1")+onlyMailboxes("ue.email_id")+`
+			`+uniboxHideExternalSentSQL("ue")+`
 		WHERE t.organization_id = $1`+tagsOnMailboxes+`
 		GROUP BY t.id, t.title, t.color, t.position
 		ORDER BY t.position ASC, t.title ASC
@@ -2095,6 +2110,7 @@ func (r *uniboxRepository) overview(ctx context.Context, orgID uuid.UUID, accoun
 				SELECT 1 FROM unibox_snoozes s
 				WHERE s.organization_id = $1 AND s.user_id = e.user_id AND s.thread_id = e.thread_id AND s.snoozed_until > NOW()
 			  )
+			`+uniboxHideExternalSentSQL("e")+`
 			GROUP BY e.thread_id
 		)
 		SELECT

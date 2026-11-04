@@ -64,6 +64,11 @@ func newUniboxFolderFixture(t *testing.T, pool *pgxpool.Pool) *uniboxFolderFixtu
 
 func liveUniboxFolderDB(t *testing.T) *db.DB {
 	t.Helper()
+	// Existing fixtures plant Sent rows without a matching Warmbly task.
+	// Keep that upstream behaviour unless a test opts into the hide filter.
+	if os.Getenv("UNIBOX_HIDE_EXTERNAL_SENT_ENABLED") == "" {
+		t.Setenv("UNIBOX_HIDE_EXTERNAL_SENT_ENABLED", "false")
+	}
 	dsn := os.Getenv("WARMBLY_TEST_DB")
 	if dsn == "" {
 		t.Skip("WARMBLY_TEST_DB not set")

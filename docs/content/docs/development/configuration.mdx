@@ -322,6 +322,12 @@ The backend refuses to start without `EMAIL_ADDRESS` and `EMAIL_NAME`. The consu
 |---|---|---|---|
 | `MAILBOX_EXTERNAL_SEND_GAP_ENABLED` | Fold the latest synced Sent row in the unibox (including mail sent outside Warmbly) into each mailbox's min-gap clock for campaign and warmup schedule, execute rechecks, and campaign send claims. Gap length is still the mailbox's `min_wait_time` / sending-behaviour floor. On unless set to `false`; set it on backends | `true` | yes |
 
+## Unibox Sent visibility
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `UNIBOX_HIDE_EXTERNAL_SENT_ENABLED` | Hide Sent copies that have no matching Warmbly `tasks.message_id` (mail sent from the provider UI) from unibox search, thread reads, and overview counts. Rows stay stored so mailbox spacing can still see them. On unless set to `false`; set it on backends | `true` | yes |
+
 ## Pre-send verification
 
 Before a campaign sends to an address, the backend can check it: syntax, then `MX`, then an `SMTP` `RCPT` probe against the recipient's mail server. An address that comes back `invalid` is skipped rather than sent to, which turns a would-be hard bounce into a silent drop. The probe runs from the backend, never from a worker, because workers are your sending IPs.
