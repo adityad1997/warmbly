@@ -520,8 +520,11 @@ func (r *taskRepository) CountCampaignEmailsSentToday(ctx context.Context, accou
 	return count, err
 }
 
-const lastEmailTimesSQL = `
-	SELECT m.id, GREATEST(t.completed_at, ea.send_claimed_at)
+// lastEmailTimesQuery is the pool min-gap clock: Warmbly task completions,
+// an open send claim, and (when enabled) the latest synced Sent row.
+func lastEmailTimesQuery() string {
+	return `
+	SELECT m.id, GREATEST(t.completed_at, ea.send_claimed_at, u.at)
 	FROM unnest($1::uuid[]) AS m(id)
 	LEFT JOIN LATERAL (
 		SELECT t.completed_at FROM tasks t
@@ -530,8 +533,10 @@ const lastEmailTimesSQL = `
 		ORDER BY t.completed_at DESC LIMIT 1
 	) t ON true
 	LEFT JOIN email_accounts ea ON ea.id = m.id
-	WHERE t.completed_at IS NOT NULL OR ea.send_claimed_at IS NOT NULL
+	LEFT JOIN LATERAL ` + lastUniboxSentLateral("m.id", "at") + `
+	WHERE t.completed_at IS NOT NULL OR ea.send_claimed_at IS NOT NULL OR u.at IS NOT NULL
 `
+}
 
 // GetLastEmailTimes is the min-gap clock for a whole pool in one query.
 func (r *taskRepository) GetLastEmailTimes(ctx context.Context, accountIDs []uuid.UUID) (map[uuid.UUID]time.Time, error) {
@@ -539,7 +544,7 @@ func (r *taskRepository) GetLastEmailTimes(ctx context.Context, accountIDs []uui
 	if len(accountIDs) == 0 {
 		return out, nil
 	}
-	rows, err := r.db.Query(ctx, lastEmailTimesSQL, accountIDs)
+	rows, err := r.db.Query(ctx, lastEmailTimesQuery(), accountIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -750,8 +755,10 @@ func (r *taskRepository) CountWarmupEmailsSentToday(ctx context.Context, account
 }
 
 // GetLastEmailTime gets the last email send time for an account. It is the
-// min-gap clock, so it reads real sends and campaign sends claimed but not yet
-// handed off.
+// min-gap clock, so it reads real Warmbly sends, campaign sends claimed but
+// not yet handed off, and (when enabled) the latest synced Sent row from the
+// mailbox itself — including mail sent outside Warmbly that has already been
+// imported into unibox_emails.
 func (r *taskRepository) GetLastEmailTime(ctx context.Context, accountID uuid.UUID) (*time.Time, error) {
 	query := `
 		SELECT GREATEST(
@@ -762,7 +769,8 @@ func (r *taskRepository) GetLastEmailTime(ctx context.Context, accountID uuid.UU
 			   AND t.completed_at IS NOT NULL
 			   AND ` + taskDispatchedEmail + `
 			 ORDER BY t.completed_at DESC LIMIT 1),
-			(SELECT send_claimed_at FROM email_accounts WHERE id = $1))
+			(SELECT send_claimed_at FROM email_accounts WHERE id = $1),
+			` + lastUniboxSentSQL("$1") + `)
 	`
 
 	var lastTime *time.Time

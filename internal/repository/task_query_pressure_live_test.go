@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/warmbly/warmbly/internal/config"
 )
 
 const legacyCampaignSendToday = `t.status = 'completed' AND t.task_type = 'campaign'
@@ -21,13 +22,21 @@ const legacyPlacementSendToday = `t.task_type = 'placement'
 	AND ((t.status = 'completed' AND (t.completed_at AT TIME ZONE 'UTC')::date = (NOW() AT TIME ZONE 'UTC')::date)
 	OR (t.status IN ('pending', 'active') AND t.scheduled_at < (((NOW() AT TIME ZONE 'UTC')::date + 1)::timestamp AT TIME ZONE 'UTC')))`
 
-const legacyLastEmailTimesSQL = `SELECT id, MAX(at) FROM (
+func legacyLastEmailTimesSQL() string {
+	q := `SELECT id, MAX(at) FROM (
 	SELECT t.email_account_id AS id, t.completed_at AS at FROM tasks t
 	WHERE t.email_account_id = ANY($1) AND t.status = 'completed'
 	AND t.completed_at IS NOT NULL AND ` + taskDispatchedEmail + `
 	UNION ALL SELECT ea.id, ea.send_claimed_at FROM email_accounts ea
-	WHERE ea.id = ANY($1) AND ea.send_claimed_at IS NOT NULL
+	WHERE ea.id = ANY($1) AND ea.send_claimed_at IS NOT NULL`
+	if config.MailboxExternalSendGapEnabled() {
+		q += `
+	UNION ALL SELECT ue.email_id AS id, ue.internal_date AS at FROM unibox_emails ue
+	WHERE ue.email_id = ANY($1) AND ue.folder = 'sent' AND ue.internal_date IS NOT NULL`
+	}
+	return q + `
 ) last GROUP BY id`
+}
 
 const legacyLastSendTimesSQL = `SELECT t.email_account_id, MAX(t.completed_at) FROM tasks t
 	WHERE t.email_account_id = ANY($1) AND t.status = 'completed' AND t.task_type = $2::task_type
@@ -131,7 +140,7 @@ func TestLiveTaskLedgerRangesAndClocksMatchLegacy(t *testing.T) {
 				if _, err := pool.Exec(ctx, `UPDATE email_accounts SET send_claimed_at=$2 WHERE id=ANY($1)`, []uuid.UUID{f.sender, f.recipient}, claim); err != nil {
 					t.Fatal(err)
 				}
-				want := taskClockMap(t, pool, legacyLastEmailTimesSQL, ids)
+				want := taskClockMap(t, pool, legacyLastEmailTimesSQL(), ids)
 				got, err := r.GetLastEmailTimes(ctx, ids)
 				if err != nil || !reflect.DeepEqual(taskClockUTC(got), want) {
 					t.Fatalf("last clock=%v want=%v err=%v", got, want, err)
@@ -265,7 +274,7 @@ func TestLiveTaskQueryPressureUsesBoundedHistory(t *testing.T) {
 	for _, tc := range []struct{ name, before, after, args string }{
 		{"daily_campaign", `SELECT COUNT(*) FROM tasks t WHERE email_account_id=$1 AND ` + legacyCampaignSendToday,
 			`SELECT COUNT(*) FROM tasks t WHERE email_account_id=$1 AND ` + campaignSendToday, fmt.Sprintf("'%s'", f.sender)},
-		{"pool_clock", legacyLastEmailTimesSQL, lastEmailTimesSQL, array},
+		{"pool_clock", legacyLastEmailTimesSQL(), lastEmailTimesQuery(), array},
 		{"rotation_clock", legacyLastSendTimesSQL, lastSendTimesSQL, array + ",'campaign'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

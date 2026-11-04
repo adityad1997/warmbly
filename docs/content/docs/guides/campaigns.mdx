@@ -206,7 +206,7 @@ Warmbly is mailbox-first: safe volume is the sum of each mailbox's budget, not o
 | Limit | Default | What it does |
 | --- | --- | --- |
 | Per-mailbox cold cap | `50`/day | Hard ceiling for cold mail from one mailbox |
-| Minimum gap | `600s` | Shortest spacing between two sends from one mailbox, always enforced |
+| Minimum gap | `600s` | Shortest spacing between two sends from one mailbox, always enforced. Counts Warmbly sends and synced Sent mail from the mailbox itself (see [mailboxes](/guides/mailboxes/#sending-controls)) |
 | Campaign daily limit | Per campaign | A per-mailbox cap for this campaign, validated `3` to `5000` |
 
 The campaign daily limit applies as a minimum against the cold cap, so it can lower a mailbox's volume but never raise it above the mailbox's own daily cap (default `50`/day).

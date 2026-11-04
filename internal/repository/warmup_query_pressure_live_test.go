@@ -80,7 +80,7 @@ func TestLiveWarmupDispatchQueryPlansUseMailboxAndMessageIndexes(t *testing.T) {
 	for _, tc := range []struct {
 		name, query, args, index string
 	}{
-		{"budget", warmupDispatchUsageSQL, fmt.Sprintf("'%s','%s',date_trunc('day',now()),date_trunc('day',now())+interval '1 day',date_trunc('hour',now()),date_trunc('hour',now())+interval '1 hour'", f.sender, uuid.Nil), "idx_tasks_dispatch_usage"},
+		{"budget", warmupDispatchUsageQuery(), fmt.Sprintf("'%s','%s',date_trunc('day',now()),date_trunc('day',now())+interval '1 day',date_trunc('hour',now()),date_trunc('hour',now())+interval '1 hour'", f.sender, uuid.Nil), "idx_tasks_dispatch_usage"},
 		{"conversation", ownConversationSQL, fmt.Sprintf("'%s','%s',ARRAY['absent@query-plan.test'],''", f.user, f.sender), "idx_tasks_message_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
