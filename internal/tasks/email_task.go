@@ -935,26 +935,39 @@ func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email
 	if account == nil {
 		return "premium"
 	}
+	return warmupPoolTypeFor(account.OrganizationID, account.WarmupPoolType,
+		func(org uuid.UUID) bool { return s.orgSuspendedOrRestricted(ctx, org) },
+		func(org uuid.UUID) (bool, bool) { return s.hasPremiumWarmup(ctx, org) })
+}
+
+// warmupPoolTypeFor is the pool a mailbox belongs in, given lookups for its organization.
+func warmupPoolTypeFor(orgID *uuid.UUID, stored string, restricted func(uuid.UUID) bool, premium func(uuid.UUID) (paid, known bool)) string {
 	// No organization means no entitlement to check, so the mailbox gets the
 	// lower-trust pool rather than defaulting into the paid one.
-	if account.OrganizationID == nil {
+	if orgID == nil {
 		return "free"
 	}
 	// A restricted organization leaves the paid pool whatever it pays. Checked
 	// before the stored tier, which is never empty and would short-circuit it.
-	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
+	if restricted(*orgID) {
 		return "free"
 	}
-	if account.WarmupPoolType != "" {
-		return account.WarmupPoolType
+	if stored != "" {
+		return stored
 	}
-	if s.featureGate != nil {
-		isPaid, xerr := s.featureGate.HasPremiumWarmup(ctx, *account.OrganizationID)
-		if xerr == nil && !isPaid {
-			return "free"
-		}
+	if paid, known := premium(*orgID); known && !paid {
+		return "free"
 	}
 	return "premium"
+}
+
+// hasPremiumWarmup reports the organization's paid warmup, and whether it could be read.
+func (s *tasksService) hasPremiumWarmup(ctx context.Context, orgID uuid.UUID) (bool, bool) {
+	if s.featureGate == nil {
+		return false, false
+	}
+	isPaid, xerr := s.featureGate.HasPremiumWarmup(ctx, orgID)
+	return isPaid, xerr == nil
 }
 
 func (s *tasksService) scheduleWarmupRecovery(ctx context.Context, accountID uuid.UUID, poolType string) {
@@ -1124,6 +1137,10 @@ func (s *tasksService) publishWarmupEmailSentEvent(ctx context.Context, task *Ta
 		}
 	}
 
+	if s.streamingPublisher != nil && account != nil && account.OrganizationID != nil {
+		s.streamingPublisher.PublishWarmupActivity(ctx, account.OrganizationID.String(), account.UserID, account.ID.String(), account.Email)
+	}
+
 	if s.advanced != nil && account != nil && account.OrganizationID != nil {
 		s.advanced.EmitCampaignEvent(ctx, *account.OrganizationID, models.WebhookEventWarmupEmailSent, map[string]any{
 			"email_account_id": account.ID.String(),
@@ -1160,11 +1177,11 @@ func (s *tasksService) directedWarmupPartner(ctx context.Context, taskID uuid.UU
 	if err != nil || warmupTask == nil || warmupTask.TargetAccountID == nil {
 		return nil
 	}
-	return s.replyPartner(ctx, taskID, *warmupTask.TargetAccountID, account, poolType)
+	return s.replyPartner(ctx, *warmupTask.TargetAccountID, account, poolType)
 }
 
 // replyPartner is target when this mailbox may answer it now, or nil.
-func (s *tasksService) replyPartner(ctx context.Context, taskID, target uuid.UUID, account *Email, poolType string) *Email {
+func (s *tasksService) replyPartner(ctx context.Context, target uuid.UUID, account *Email, poolType string) *Email {
 	if s.warmupHealth != nil {
 		ok, reason, herr := s.warmupHealth.CanParticipate(ctx, target, poolType)
 		if herr != nil {
@@ -1195,15 +1212,6 @@ func (s *tasksService) replyPartner(ctx context.Context, taskID, target uuid.UUI
 	// too; the thread exists because the other side started it (#501).
 	if rules := s.warmupRoutingRules(ctx, account, poolType); len(rules) > 0 {
 		if routingMultiplier(rules, account.Email, partner.Email) <= 0 {
-			return nil
-		}
-	}
-	// A reply holds the mailbox's only warmup task, so one to a full inbox ends the thread rather than waiting on the reservation's refusal.
-	if room, ok := s.warmupRepo.(interface {
-		WarmupInboxHasRoom(context.Context, uuid.UUID, string) (bool, error)
-	}); ok {
-		if has, err := room.WarmupInboxHasRoom(ctx, partner.ID, poolType); err == nil && !has {
-			log.Info().Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("warmup reply closed: the recipient's inbox is full today")
 			return nil
 		}
 	}

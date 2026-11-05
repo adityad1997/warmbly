@@ -367,6 +367,13 @@ export function useRealtimeEvents() {
         return
       }
 
+      // A mailbox sent or received warmup mail: only its own counts moved.
+      if (event === 'WARMUP_ACTIVITY') {
+        const accountId = getString('email_account_id')
+        if (accountId) accountRefresh.add([['analytics', 'warmup', accountId], ['analytics', 'accounts', accountId]])
+        return
+      }
+
       if (includes('ACCOUNT', 'EMAIL_STATUS', 'EMAIL_ERROR', 'WARMUP')) {
         // ACCOUNT_SYNC_STATE: the mailbox's import finished or fair use
         // started/stopped holding it; the drawer's sync card refetches.
@@ -432,14 +439,15 @@ export function useRealtimeEvents() {
 
       // A meeting was booked / rescheduled / canceled (Calendly / Cal.com):
       // refresh the Meetings page list + summary, the integrations bookings
-      // list, and the originating contact's timeline so the call appears live.
+      // list, and the originating contact's timeline and campaign state (a
+      // booking can stop their follow-ups) so the call appears live.
       if (includes('MEETING', 'BOOKING')) {
         invalidate([
           ['meetings'],
           ['meetings', 'summary'],
           ['integrations', 'bookings'],
         ])
-        if (contactId) invalidate([['contacts', contactId, 'timeline']])
+        if (contactId) invalidate([['contacts', contactId, 'timeline'], ['contacts', contactId, 'campaign-state']])
         return
       }
 
