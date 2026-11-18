@@ -15,11 +15,14 @@ import { useCampaign } from "@/hooks/context/campaign";
 import useCampaignAnalytics from "@/lib/api/hooks/app/analytics/useCampaignAnalytics";
 import type { CampaignEngagementBreakdown, CampaignSummary, EngagementBucket } from "@/lib/api/models/app/analytics/CampaignAnalytics";
 import useCampaignDailyStats from "@/lib/api/hooks/app/analytics/useCampaignDailyStats";
-import { SectionBar, Stat, StatStrip } from "@/components/layout/Page";
+import { SectionBar, StatStrip } from "@/components/layout/Page";
+import { TrendStat } from "@/components/ui/TrendStat";
+import { dailyPoints, utcDayRange } from "@/lib/trendPoints";
 import { MultiTrend, type TrendSeries } from "@/components/ui/charts";
 import { TONE_DOT } from "@/components/ui/tones";
 import type { DitherTone } from "@/components/ui/dither";
 import AnalyticsShareButton from "@/components/app/analytics/AnalyticsShareButton";
+import ShareCampaignReportButton from "@/components/app/reports/ShareCampaignReportButton";
 import TaskPreview from "@/components/app/campaigns/TaskPreview";
 import SendPlanCard from "@/components/app/campaigns/SendPlanCard";
 import DraftSetupCard from "@/components/app/campaigns/DraftSetupCard";
@@ -27,6 +30,7 @@ import CampaignFormsPanel from "@/components/app/campaigns/CampaignFormsPanel";
 import AnimatedNumber from "@/components/ui/AnimatedNumber";
 import AdvisorStrip from "@/components/app/advisor/AdvisorStrip";
 import CampaignPeriodPicker from "@/components/app/campaigns/CampaignPeriodPicker";
+import { trackedRate, trackedUnit } from "@/lib/trackedRate";
 import { formatWindow, loadCampaignPeriod, periodWindow, utcDay, utcToday, type CampaignPeriod, type DayWindow } from "@/lib/campaignPeriod";
 
 const AUTO_OPENS_TIP = "Auto-opens: pixel fetches from privacy proxies (e.g. Apple Mail) or within seconds of sending, not a person reading. Logged as delivery proof, not counted as opens";
@@ -106,6 +110,21 @@ export default function CampaignOverview() {
         return { labels: rows.map((d) => d.date), series };
     }, [daily.data, hiddenMetrics]);
 
+    // The strip's lines span the same days as the chart, quiet days included.
+    const chartFrom = chartWindow?.from;
+    const chartTo = chartWindow?.to;
+    const dayPoints = useMemo(() => {
+        const days = chartFrom && chartTo ? utcDayRange(chartFrom, chartTo) : [];
+        const rows = daily.data;
+        return {
+            sent: dailyPoints(days, rows, (d) => d.sent),
+            opens: dailyPoints(days, rows, (d) => d.opens),
+            clicks: dailyPoints(days, rows, (d) => d.clicks),
+            replies: dailyPoints(days, rows, (d) => d.replies),
+            positive: dailyPoints(days, rows, (d) => d.positive_replies),
+        };
+    }, [chartFrom, chartTo, daily.data]);
+
     // A previous period's figures kept on screen while the new one loads must
     // not sit under the new period's label or reach a share export.
     const loading =
@@ -117,12 +136,17 @@ export default function CampaignOverview() {
     const periodLabel = covered ? formatWindow(covered) : null;
 
     const shared = loading ? undefined : summary;
+    const openRate = trackedRate(summary?.open_rate, summary?.open_tracked_sent, summary?.emails_sent);
+    const clickRate = trackedRate(summary?.click_rate, summary?.click_tracked_sent, summary?.emails_sent);
     const shareData = {
         title: campaign?.name ?? "Campaign",
         subtitle: periodLabel ? `${allTime ? "All time, " : ""}${periodLabel}` : "Campaign",
         metrics: [
             { label: "Sent", value: shared ? num(shared.emails_sent) : "—", sub: "emails" },
-            { label: "Open rate", value: pct(shared?.open_rate) },
+            {
+                label: "Open rate",
+                value: shared && trackedRate(shared.open_rate, shared.open_tracked_sent, shared.emails_sent) == null ? "Off" : pct(shared?.open_rate),
+            },
             { label: "Reply rate", value: pct(shared?.reply_rate) },
             {
                 label: "Positive rate",
@@ -193,38 +217,62 @@ export default function CampaignOverview() {
                                 data={shareData}
                                 filename={`warmbly-${campaign.id}.png`}
                             />
+                            {!restricted && <ShareCampaignReportButton campaignId={campaign.id} campaignName={campaign.name} />}
                         </SectionBar>
                         <StatStrip cols={6}>
-                            <Stat
+                            <TrendStat
                                 label="Sent"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.emails_sent ?? 0} />}
-                                sub="emails"
-                                accent={hasSends}
+                                unit="emails"
+                                points={loading ? undefined : dayPoints.sent}
+                                pending={loading}
+                                kind="area"
+                                tone="sky"
+                                format={(v) => `${v.toLocaleString()} sent`}
                             />
-                            <Stat
+                            <TrendStat
                                 label="Open rate"
-                                value={loading ? "—" : <AnimatedNumber value={summary?.open_rate ?? 0} format={pctFmt} />}
-                                sub="after delivery"
+                                value={loading ? "—" : openRate == null ? "Off" : <AnimatedNumber value={openRate} format={pctFmt} />}
+                                unit={trackedUnit(summary?.open_tracked_sent, summary?.emails_sent, "after delivery")}
+                                points={loading ? undefined : dayPoints.opens}
+                                pending={loading}
+                                tone="slate"
+                                format={(v) => `${v.toLocaleString()} opens`}
                             />
-                            <Stat
+                            <TrendStat
                                 label="Click rate"
-                                value={loading ? "—" : <AnimatedNumber value={summary?.click_rate ?? 0} format={pctFmt} />}
-                                sub="of delivered"
+                                value={loading ? "—" : clickRate == null ? "Off" : <AnimatedNumber value={clickRate} format={pctFmt} />}
+                                unit={trackedUnit(summary?.click_tracked_sent, summary?.emails_sent, "of delivered")}
+                                points={loading ? undefined : dayPoints.clicks}
+                                pending={loading}
+                                tone="slate"
+                                format={(v) => `${v.toLocaleString()} clicks`}
                             />
-                            <Stat
+                            <TrendStat
                                 label="Reply rate"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.reply_rate ?? 0} format={pctFmt} />}
-                                sub="human replies"
+                                unit="human replies"
+                                points={loading ? undefined : dayPoints.replies}
+                                pending={loading}
+                                kind="bars"
+                                tone="slate"
+                                format={(v) => `${v.toLocaleString()} ${v === 1 ? "reply" : "replies"}`}
                             />
-                            <Stat
+                            <TrendStat
                                 label="Positive rate"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.positive_reply_rate ?? 0} format={pctFmt} />}
-                                sub={loading ? undefined : `${num(summary?.interested_leads)} interested`}
+                                unit={loading ? undefined : `${num(summary?.interested_leads)} interested`}
+                                points={loading ? undefined : dayPoints.positive}
+                                pending={loading}
+                                kind="bars"
+                                tone="emerald"
+                                format={(v) => `${v.toLocaleString()} positive`}
                             />
-                            <Stat
+                            <TrendStat
                                 label="Bounce rate"
                                 value={loading ? "—" : <AnimatedNumber value={summary?.bounce_rate ?? 0} format={pctFmt} />}
-                                sub="hard + soft"
+                                unit="hard + soft"
+                                note={!loading && (summary?.bounce_rate ?? 0) >= 5 ? <span className="text-amber-700">high</span> : undefined}
                                 last
                             />
                         </StatStrip>
@@ -335,6 +383,7 @@ export default function CampaignOverview() {
                                             count={s.opens ?? 0}
                                             rate={s.open_rate}
                                             sent={s.emails_sent ?? 0}
+                                            tracked={s.open_tracked_sent}
                                             tone="text-emerald-600"
                                             auto={s.machine_opens}
                                             autoTip={AUTO_OPENS_TIP}
@@ -344,6 +393,7 @@ export default function CampaignOverview() {
                                             count={s.clicks ?? 0}
                                             rate={s.click_rate}
                                             sent={s.emails_sent ?? 0}
+                                            tracked={s.click_tracked_sent}
                                             tone="text-violet-600"
                                             auto={s.machine_clicks}
                                             autoTip={AUTO_CLICKS_TIP}
@@ -450,6 +500,7 @@ function StepMetric({
     count,
     rate,
     sent,
+    tracked,
     tone,
     auto,
     autoTip,
@@ -459,17 +510,26 @@ function StepMetric({
     count: number;
     rate: number | undefined;
     sent: number;
+    // The sends that could register this metric, when it needs tracking.
+    tracked?: number;
     tone: string;
     auto?: number;
     autoTip?: string;
     desktopOnly?: boolean;
 }) {
-    // A step that has not sent has no rate, and 0.0% would read as a result.
-    const share = sent > 0 ? `${(rate ?? 0).toFixed(1)}%` : "—";
+    // A step that has not sent has no rate, and neither has one sent with
+    // tracking off: 0.0% would read as a result.
+    const off = sent > 0 && tracked === 0;
+    const base = tracked ?? sent;
+    const share = off ? "off" : sent > 0 ? `${(rate ?? 0).toFixed(1)}%` : "—";
     const flagged = !!auto && !!autoTip;
     const title = [
         `${label}: ${count.toLocaleString()}`,
-        sent > 0 ? `${share} of ${sent.toLocaleString()} sent` : "nothing sent yet",
+        off
+            ? "not tracked: tracking was off for this step's sends"
+            : sent > 0
+              ? `${share} of ${base.toLocaleString()} ${base < sent ? "tracked sends" : "sent"}`
+              : "nothing sent yet",
         flagged ? `${auto} automated. ${autoTip}` : null,
     ]
         .filter(Boolean)

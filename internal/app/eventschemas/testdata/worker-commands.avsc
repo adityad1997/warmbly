@@ -121,6 +121,14 @@
                           "type": "record"
                         }
                       ]
+                    },
+                    {
+                      "default": null,
+                      "name": "full_mail_access",
+                      "type": [
+                        "null",
+                        "boolean"
+                      ]
                     }
                   ],
                   "name": "warmbly.events.AddWorkerEmailGoogleData",
@@ -1065,11 +1073,6 @@
             {
               "default": "",
               "name": "filing_id",
-              "type": "string"
-            },
-            {
-              "default": "",
-              "name": "command_id",
               "type": "string"
             },
             {

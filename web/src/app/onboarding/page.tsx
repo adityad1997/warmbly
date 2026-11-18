@@ -16,6 +16,8 @@ import type Organization from "@/lib/api/models/app/organizations/Organization";
 import { browserTimezone } from "@/lib/timezone";
 import type { AppError } from "@/lib/api/client/normalizeError";
 import buildError from "@/lib/helper/buildError";
+import { postAuthNext } from "@/lib/helper/safeNext";
+import { hrefTarget } from "@/lib/routerSearch";
 import { PERSON_NAME_MAX, WORKSPACE_NAME_MAX, nameError, normalizeName, type NameKind } from "@/lib/displayName";
 
 /* ── Schema ─────────────────────── */
@@ -202,7 +204,14 @@ export default function OnboardingPage() {
                 team_size: data.team_size,
             });
             queryClient.removeQueries({ queryKey: ["auth", "me"] });
-            navigate({ to: "/app/emails" });
+            const target = postAuthNext(new URLSearchParams(window.location.search).get("next"));
+            // An agency lands on the offer to set one up, unless a link sent them somewhere specific; it can be skipped there.
+            const landing = new URL(target, window.location.origin).pathname.replace(/\/+$/, "");
+            if (data.role === "agency" && (landing === "/app" || landing === "/app/emails")) {
+                navigate({ to: "/app/agency" });
+                return;
+            }
+            navigate(hrefTarget(target));
         } catch (e) {
             toast.error(buildError(e as AppError));
         }

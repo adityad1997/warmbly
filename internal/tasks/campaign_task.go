@@ -16,6 +16,7 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/pubsub"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/observability/errs"
+	"github.com/warmbly/warmbly/internal/pkg/mailhdr"
 	"github.com/warmbly/warmbly/internal/pkg/mailhtml"
 	"github.com/warmbly/warmbly/internal/repository"
 	"github.com/warmbly/warmbly/internal/scheduler"
@@ -718,8 +719,10 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 		}
 	}
 
+	var sendTracking models.SendTracking
 	if campaign.OpenTracking && bodyHTML != "" {
 		bodyHTML = AddOpenTrackingPixel(bodyHTML, taskID, trackingDomain)
+		sendTracking.Opens = true
 	}
 
 	if bodyHTML != "" && (campaign.LinkTracking || campaign.UTMTracking) {
@@ -741,6 +744,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 			bodyHTML, _ = TrackLinks(bodyHTML, LinkTracking{TrackingDomain: linkOpts.TrackingDomain, UTM: linkOpts.UTM})
 		} else {
 			bodyHTML = tracked
+			sendTracking.Clicks = campaign.LinkTracking
 		}
 	}
 	if campaign.UTMTracking && bodyPlain != "" {
@@ -818,7 +822,7 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 		s.retryCampaignTickLater(ctx, taskRecord)
 		return errx.InternalError()
 	}
-	reserved, rerr := s.campaignProgressRepo.ReserveSend(ctx, campaign.ID, contact.ID, sequence.ID, taskID, account.ID, nextPair.IsNewLead, rendered.Arm)
+	reserved, rerr := s.campaignProgressRepo.ReserveSend(ctx, campaign.ID, contact.ID, sequence.ID, taskID, account.ID, nextPair.IsNewLead, rendered.Arm, sendTracking)
 	if rerr != nil {
 		// The attempt could not be made durable, so it must not be made at all.
 		// Retry the whole task rather than sending something nothing remembers.
@@ -867,6 +871,9 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 	}
 	if threadParent != nil {
 		emailMsg.InReplyTo = threadParent.MessageID
+		// The whole conversation, whichever mailbox sent each step, so the
+		// recipient's client threads a follow-up from another address too.
+		emailMsg.References = mailhdr.ConversationReferences(append(threadParent.References, threadParent.MessageID))
 		// The provider handle needs two things the headers do not. It is
 		// meaningless outside the mailbox that owns it, and Gmail will not
 		// file a message in a thread whose subject it does not match, so it
@@ -917,12 +924,18 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 		failureCode := campaignDispatchFailureCode(err)
 		s.taskRepo.RecordTaskFailure(ctx, taskID, "Send failed", err.Error())
 		if s.campaignLogRepo != nil {
+			eventType, level := "email_failed", "error"
+			message := fmt.Sprintf("%s%s's email, will retry: %s", models.DispatchFailedLogPrefix, contact.Email, err.Error())
+			// A send held back before it left is a postponement, not something to act on.
+			if deferred, ok := models.AdmissionDeferredMessage(contact.Email, failureCode); ok {
+				eventType, level, message = "email_deferred", "info", deferred
+			}
 			s.campaignLogRepo.CreateLog(ctx, &repository.CampaignLogEntry{
 				CampaignID: campaign.ID,
-				EventType:  "email_failed",
-				Message:    fmt.Sprintf("Could not dispatch %s's email, will retry: %s", contact.Email, err.Error()),
+				EventType:  eventType,
+				Message:    message,
 				Metadata: map[string]interface{}{
-					"level":       "error",
+					"level":       level,
 					"code":        failureCode,
 					"contact_id":  contact.ID.String(),
 					"sequence_id": sequence.ID.String(),
@@ -1016,8 +1029,9 @@ func (s *tasksService) HandleCampaignTask(task *proto.ProcessTask) (result *errx
 	// they had been hearing from stopped being one this campaign can send from
 	// (disconnected, taken off its sending accounts, resting, or held by warmup
 	// health), and it is the kind of thing an owner should find in the activity
-	// log rather than in a confused reply.
-	if prev := nextPair.AssignedSender; prev != nil && *prev != account.ID && s.campaignLogRepo != nil {
+	// log rather than in a confused reply. A campaign that rotates follow-ups
+	// changes address on purpose, so it is not logged there.
+	if prev := nextPair.AssignedSender; prev != nil && *prev != account.ID && s.campaignLogRepo != nil && !campaign.FollowUpSender.Rotates() {
 		from := "its previous mailbox"
 		if old, oerr := s.emailRepo.GetByID(ctx, *prev); oerr == nil && old != nil {
 			from = old.Email
@@ -1226,11 +1240,17 @@ func (s *tasksService) pauseUndeliverable(ctx context.Context, campaignID, taskI
 		})
 	}
 	if s.streamingPublisher != nil {
-		s.streamingPublisher.PublishCampaignEvent(ctx, &pubsub.CampaignEvent{
-			BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignCompleted},
+		// Org-scoped so every teammate's list and badge see the pause, with the
+		// exact status rather than "completed".
+		event := &pubsub.CampaignEvent{
+			BaseEvent:  pubsub.BaseEvent{EventType: pubsub.EventCampaignUpdated},
 			CampaignID: campaignID.String(),
 			Status:     "paused_undeliverable",
-		})
+		}
+		if c, err := s.campaignRepo.GetByID(ctx, campaignID); err == nil && c != nil {
+			event.UserID, event.OrgID, event.Name = c.UserID, campaignOrgID(c), c.Name
+		}
+		s.streamingPublisher.PublishCampaignEvent(ctx, event)
 	}
 }
 
@@ -1800,6 +1820,8 @@ func (s *tasksService) recordSchedulerFailure(ctx context.Context, campaignID uu
 	if s.campaignLogRepo == nil {
 		return
 	}
+	ctx, cancel := failurePathContext(ctx)
+	defer cancel()
 	meta := map[string]interface{}{
 		"level": "error",
 		"code":  code,
@@ -1832,6 +1854,8 @@ func (s *tasksService) resolveOptOut(ctx context.Context, orgID uuid.UUID, campa
 // out. Its slot moves with it: a due pending task is fired again every second
 // by the in-process dispatcher, and a failure that repeats would run in a loop.
 func (s *tasksService) retryCampaignTickLater(ctx context.Context, task *Task) {
+	ctx, cancel := failurePathContext(ctx)
+	defer cancel()
 	// The slot moves first: a pass left pending at its old, due slot is the
 	// loop this exists to prevent.
 	name := ""
@@ -1839,11 +1863,18 @@ func (s *tasksService) retryCampaignTickLater(ctx context.Context, task *Task) {
 		name = *task.CloudTaskName
 	}
 	if err := s.taskRepo.UpdateTaskScheduledAt(ctx, task.ID, time.Now().Add(config.CampaignTickRetrySeconds*time.Second), name); err != nil {
+		// Left active, keepChainAfterFailure closes it and starts a fresh pass instead.
 		errs.CaptureException(err)
+		return
 	}
 	if err := s.taskRepo.UpdateTaskStatus(ctx, task.ID, "pending"); err != nil {
 		errs.CaptureException(err)
 	}
+}
+
+// failurePathContext outlives the pass's own deadline, which is often what failed it.
+func failurePathContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 }
 
 // keepChainAfterFailure makes sure a campaign whose pass failed still has a

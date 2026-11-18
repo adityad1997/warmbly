@@ -33,6 +33,7 @@ const (
 	flagInt
 	flagBool
 	flagStrings
+	flagFloat
 )
 
 // argSpec is one positional argument, filling the next {} in the path.
@@ -94,18 +95,21 @@ type resource struct {
 	Long      string
 	Group     string
 	Endpoints []endpoint
+	// Children are nested resources, such as `agency clients`.
+	Children []resource
 }
 
 func resourceCommands(f *Factory) []*cobra.Command {
 	specs := resourceSpecs()
 	out := make([]*cobra.Command, 0, len(specs))
 	for _, r := range specs {
-		out = append(out, buildResource(f, r))
+		out = append(out, buildResource(f, r, ""))
 	}
 	return out
 }
 
-func buildResource(f *Factory, r resource) *cobra.Command {
+// buildResource builds one resource; parent is the command path above it, for messages.
+func buildResource(f *Factory, r resource, parent string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     r.Name + " <command>",
 		Aliases: r.Aliases,
@@ -113,13 +117,17 @@ func buildResource(f *Factory, r resource) *cobra.Command {
 		Long:    r.Long,
 		GroupID: r.Group,
 	}
+	name := strings.TrimSpace(parent + " " + r.Name)
 	for _, e := range r.Endpoints {
-		cmd.AddCommand(buildEndpoint(f, r, e))
+		cmd.AddCommand(buildEndpoint(f, name, e))
+	}
+	for _, child := range r.Children {
+		cmd.AddCommand(buildResource(f, child, name))
 	}
 	return cmd
 }
 
-func buildEndpoint(f *Factory, r resource, e endpoint) *cobra.Command {
+func buildEndpoint(f *Factory, resourceName string, e endpoint) *cobra.Command {
 	use := e.Name
 	for _, a := range e.Args {
 		use += " <" + a.Name + ">"
@@ -152,12 +160,15 @@ func buildEndpoint(f *Factory, r resource, e endpoint) *cobra.Command {
 	// Flag values are held here so the runner reads whatever cobra parsed.
 	strs := map[string]*string{}
 	ints := map[string]*int{}
+	floats := map[string]*float64{}
 	bools := map[string]*bool{}
 	slices := map[string]*[]string{}
 	for _, fl := range e.Flag {
 		switch fl.Kind {
 		case flagInt:
 			ints[fl.Name] = cmd.Flags().IntP(fl.Name, fl.Short, 0, fl.Help)
+		case flagFloat:
+			floats[fl.Name] = cmd.Flags().Float64P(fl.Name, fl.Short, 0, fl.Help)
 		case flagBool:
 			bools[fl.Name] = cmd.Flags().BoolP(fl.Name, fl.Short, false, fl.Help)
 		case flagStrings:
@@ -204,6 +215,8 @@ func buildEndpoint(f *Factory, r resource, e endpoint) *cobra.Command {
 			switch fl.Kind {
 			case flagInt:
 				value = *ints[fl.Name]
+			case flagFloat:
+				value = *floats[fl.Name]
 			case flagBool:
 				value = *bools[fl.Name]
 			case flagStrings:
@@ -248,17 +261,17 @@ func buildEndpoint(f *Factory, r resource, e endpoint) *cobra.Command {
 				return err
 			}
 		case e.Body == bodyRequired:
-			return fmt.Errorf("%s %s needs a body.\nSupply one with the flags above, with -f key=value, or with --input @file.json", r.Name, e.Name)
+			return fmt.Errorf("%s %s needs a body.\nSupply one with the flags above, with -f key=value, or with --input @file.json", resourceName, e.Name)
 		case e.Body == bodyOptional && e.Method != http.MethodGet:
 			payload = []byte("{}")
 		}
 
 		if e.Sends {
-			if err := f.ConfirmSend(fmt.Sprintf("`warmbly %s %s`", r.Name, e.Name)); err != nil {
+			if err := f.ConfirmSend(fmt.Sprintf("`warmbly %s %s`", resourceName, e.Name)); err != nil {
 				return err
 			}
 		} else if e.Method == http.MethodDelete {
-			if err := f.ConfirmMutation(fmt.Sprintf("Run `warmbly %s %s`", r.Name, e.Name)); err != nil {
+			if err := f.ConfirmMutation(fmt.Sprintf("Run `warmbly %s %s`", resourceName, e.Name)); err != nil {
 				return err
 			}
 		}

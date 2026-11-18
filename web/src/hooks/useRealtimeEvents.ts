@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast/headless'
-import { useQueryClient, type QueryKey } from '@tanstack/react-query'
+import { fmtUsd } from '@/lib/money'
+import { partialMatchKey, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import { useSocket } from './context/socket'
 import { useAppStore } from '@/stores'
 import { useUserProfile } from './context/user'
@@ -13,10 +14,10 @@ import {
   createRefreshCoalescer,
   type QueryMatch,
 } from '@/lib/realtime/refreshCoalescer'
+import { createListHeadRefresh } from '@/lib/api/hooks/app/unibox/refreshListHead'
 
 // What an inbox event moves besides its own thread; refreshed through the coalescer, never per event.
 const INBOX_AGGREGATES: QueryKey[] = [
-  ['unibox', 'overview'],
   ['unibox', 'unseen-count'],
   ['unibox', 'search'],
   ['unibox', 'incoming'],
@@ -24,8 +25,17 @@ const INBOX_AGGREGATES: QueryKey[] = [
   ['analytics'],
 ]
 
+const OVERVIEW_KEY: QueryKey = ['unibox', 'overview']
+// The overview recounts the whole workspace's mail, so a stream of arrivals refreshes it at most this often.
+const OVERVIEW_REFRESH_DELAY_MS = 4000
+const OVERVIEW_REFRESH_MAX_WAIT_MS = 15_000
+
 // Bridges realtime socket events into both the zustand store and react-query
 // cache so list pages, detail panes, counters, and workflow states stay live.
+
+// A campaign's send plan: ['campaigns', id, 'send-plan'].
+const isSendPlanQuery: QueryMatch = (q) => q.queryKey[2] === 'send-plan'
+
 export function useRealtimeEvents() {
   const { isConnected, subscribeToChannel } = useSocket()
   const { user } = useUserProfile()
@@ -76,9 +86,20 @@ export function useRealtimeEvents() {
   }, [])
 
   // One aggregate refresh per quiet interval; per-thread work once per delivery, not per channel.
-  const [inboxRefresh] = useState(() => createRefreshCoalescer(queryClient, { invalidate: gate.invalidate }))
+  // A conversation list with several pages loaded refetches only its first.
+  const [inboxRefresh] = useState(() =>
+    createRefreshCoalescer(queryClient, { invalidate: createListHeadRefresh(queryClient, gate.invalidate) }),
+  )
+  const [overviewRefresh] = useState(() =>
+    createRefreshCoalescer(queryClient, {
+      invalidate: gate.invalidate,
+      delayMs: OVERVIEW_REFRESH_DELAY_MS,
+      maxWaitMs: OVERVIEW_REFRESH_MAX_WAIT_MS,
+    }),
+  )
   const [isDuplicateDelivery] = useState(() => createDeliveryDeduper())
   useEffect(() => () => inboxRefresh.dispose(), [inboxRefresh])
+  useEffect(() => () => overviewRefresh.dispose(), [overviewRefresh])
   // Mailbox events arrive in bursts (a fleet reconnect, a pool re-evaluation),
   // and each one refetches the whole mailbox list and every status chunk.
   const [accountRefresh] = useState(() => createRefreshCoalescer(queryClient, { invalidate: gate.invalidate }))
@@ -171,7 +192,8 @@ export function useRealtimeEvents() {
       // thread if present.
       if (includes('AI_DRAFT')) {
         invalidate([['unibox', 'agent-drafts']])
-        inboxRefresh.add([['unibox', 'overview'], ['unibox', 'search']])
+        inboxRefresh.add([['unibox', 'search']])
+        overviewRefresh.add([OVERVIEW_KEY])
         if (threadId) invalidate([['unibox', 'thread', threadId]])
         return
       }
@@ -194,6 +216,7 @@ export function useRealtimeEvents() {
 
       // The named thread and message refresh now; without a thread id the message may sit in any open thread, refreshed later.
       const refreshInbox = (aggregates: QueryKey[]) => {
+        overviewRefresh.add([OVERVIEW_KEY])
         const own: QueryKey[] = []
         if (threadId) own.push(['unibox', 'thread', threadId], ['unibox', 'thread', 'labels', threadId])
         // An unthreaded message is its own conversation, keyed by its id.
@@ -224,24 +247,24 @@ export function useRealtimeEvents() {
         return
       }
 
-      // AI credit balance dipped below the org's alert threshold (fired at
-      // most once per day, gated on manage_billing server-side). Popup
-      // reminder + refresh every credits view.
+      // The balance ran low or out (once per cycle, gated on manage_billing
+      // server-side, silent while automatic reload covers it).
       if (includes('CREDITS_LOW')) {
-        const balance = typeof payload.balance === 'number' ? payload.balance : null
+        const balance = typeof payload.balance_usd === 'number' ? payload.balance_usd : null
         toast(
-          balance !== null
-            ? `AI credits are running low: ${balance} left. Top up or enable auto top-up in Billing.`
-            : 'AI credits are running low. Top up or enable auto top-up in Billing.',
+          payload.out
+            ? 'The balance is used up, so AI features are paused. Add money in Billing.'
+            : balance !== null
+              ? `The balance is running low: ${fmtUsd(balance)} left. Add money or turn on automatic reload in Billing.`
+              : 'The balance is running low. Add money or turn on automatic reload in Billing.',
           { icon: '⚠️', duration: 8000, id: 'credits-low' },
         )
         invalidate([['subscription', 'credits']])
         return
       }
 
-      // Any fresh AI credit debit (fired per charge, including scheduled
-      // campaign/automation spends) — keep every credits view live so the
-      // meter visibly moves when credits are used.
+      // Any charge or refund (including scheduled campaign and automation
+      // work) keeps every balance view live.
       if (includes('CREDITS_CHANGED')) {
         invalidate([['subscription', 'credits']])
         return
@@ -269,10 +292,13 @@ export function useRealtimeEvents() {
       if (includes('CONTACT')) {
         invalidate([
           ['contacts'],
+          ['segments'],
           ['campaigns', 'list'],
           ['analytics'],
           ['organizations', 'limits'],
         ])
+        // A contact's location feeds the location segment fields and each campaign's lead timezones.
+        gate.invalidate({ predicate: (q) => q.queryKey[0] === 'campaigns' && q.queryKey[2] === 'lead-timezones' })
         if (contactId) invalidate([['contacts', contactId]])
         return
       }
@@ -386,6 +412,8 @@ export function useRealtimeEvents() {
           ['analytics', 'dashboard'],
           ['cloud-link'],
         ])
+        // A mailbox's health, status or warmup moves the per-mailbox limits in every send plan.
+        accountRefresh.add([['campaigns']], isSendPlanQuery)
         return
       }
 
@@ -519,6 +547,10 @@ export function useRealtimeEvents() {
           suppression: [['suppressions'], ['contacts'], ['analytics']],
           segment: [['segments'], ['contacts', 'list']],
           form: [['forms']],
+          // A client report, its share link or its schedule changed.
+          client_report: [['reports']],
+          // An agency's clients, staff, caps, plan or brand changed; a client joining or leaving moves the workspace list too.
+          agency: [['agency'], ['organizations'], ['brand']],
           campaign: [['campaigns'], ['analytics']],
           // One lead paused or resumed inside one campaign: the Leads list and
           // its scope-chip counts move, and so does the contact drawer.
@@ -530,13 +562,19 @@ export function useRealtimeEvents() {
           // refreshes everyone's open drawer instead of only the list row.
           // A mailbox write can move it off Google sign-in, so the migration list follows.
           // A seed toggle is audited here too, so the placement seed list follows.
-          email_account: [['emails'], ['analytics', 'accounts'], ['sending-domains'], ['mailbox-grants', 'migration'], ['pool-link'], ['placement', 'seeds'], ['placement', 'overview']],
+          email_account: [['emails'], ['analytics', 'accounts'], ['sending-domains'], ['mailbox-grants', 'migration'], ['pool-link'], ['placement', 'seeds'], ['placement', 'overview'], ['mailbox-signin']],
           // A mailbox import created, retried or cancelled by a teammate; it may move mailboxes onto a grant.
           mailbox_import: [['emails', 'imports'], ['mailbox-grants', 'migration']],
+          // A client connect link created, revoked or used; the mailbox it connected arrives as email_account.
+          client_connect_link: [['emails', 'connect-links']],
           // An admin grant added, re-checked or removed, and an inbox vendor
           // account connected, re-keyed or removed.
-          mailbox_grant: [['mailbox-grants'], ['emails', 'list']],
-          mailbox_vendor: [['mailbox-vendors'], ['sending-domains']],
+          mailbox_grant: [['mailbox-grants'], ['emails', 'list'], ['mailbox-signin']],
+          // A vendor reconnect moving on also moves the drawer's Sign-in section.
+          mailbox_vendor: [['mailbox-vendors'], ['sending-domains'], ['mailbox-signin']],
+          // Partnership: a teammate saved or removed the workspace's own OAuth app, or made or revoked a sign-in link.
+          mailbox_oauth_app: [['mailbox-oauth-apps']],
+          mailbox_connect_link: [['mailbox-connect-links']],
           // A sending domain's root redirect or vendor forwarding changed. Its
           // tracking host is an email_account write, covered above.
           domain_redirect: [['sending-domains']],
@@ -546,6 +584,8 @@ export function useRealtimeEvents() {
           // The workspace image library the composer picks body images from.
           email_image: [['email-images']],
           organization: [['organizations']],
+          // A workspace's brand: the Branding page, and the chrome a client member sees.
+          workspace_brand: [['brand']],
           // A risk transition changes send caps and warmup pool placement, so
           // the mailbox and analytics views move with it, not just the banner.
           org_risk: [['organizations'], ['emails'], ['analytics']],
@@ -565,12 +605,13 @@ export function useRealtimeEvents() {
             ['crm', 'owners'],
           ],
           lead_sync_source: [['lead-sync', 'sources']],
+          lead: [['leads']],
+          lead_search: [['leads', 'searches']],
           meeting: [['meetings'], ['meetings', 'summary']],
           subscription: [['subscription'], ['organizations', 'limits']],
-          referral: [['subscription', 'referral']],
-          referral_credit: [['subscription', 'referral'], ['subscription']],
-          // AI credits: a top-up purchase or a monthly allowance reset both
-          // change the billing/credits view for every teammate.
+          referral_credit: [['subscription']],
+          // Money added, an automatic reload, a reset or a settings change
+          // refreshes the balance, invoices and activity for every teammate.
           credit_purchase: [['subscription', 'credits'], ['subscription']],
           credit_grant: [['subscription', 'credits'], ['subscription']],
           // AI assistant sessions (per-user; refreshes the session list).
@@ -600,6 +641,8 @@ export function useRealtimeEvents() {
             ['organizations', 'exports'],
             ['organizations', 'imports'],
           ],
+          // A migration from another tool created, started, finished or canceled; a finished one brought data in.
+          tool_migration: [['tool-migrations'], ['campaigns'], ['contacts'], ['emails'], ['suppressions']],
           crm_note: [['crm'], ['contacts']],
           crm_pipeline: [['crm', 'pipelines'], ['crm', 'deals']],
           crm_stage: [['crm', 'pipelines'], ['crm', 'deals']],
@@ -619,8 +662,16 @@ export function useRealtimeEvents() {
         }
         const keys = spine[entityType]
         if (keys) invalidate(keys)
+        if (entityType === 'email_account') {
+          // Send plans and the sidebar's capacity read mailbox limits.
+          accountRefresh.add([['analytics', 'dashboard']])
+          accountRefresh.add([['campaigns']], isSendPlanQuery)
+        }
         // Unibox writes come in bursts (reading, filing), so they ride the coalescer.
-        if (entityType === 'unibox') inboxRefresh.add([['unibox']])
+        if (entityType === 'unibox') {
+          inboxRefresh.add([['unibox']], (q) => !partialMatchKey(q.queryKey, OVERVIEW_KEY))
+          overviewRefresh.add([OVERVIEW_KEY])
+        }
         // A deletion also takes the entity's inbox mail, unread badge and
         // advice with it, which no update ever does.
         if (getString('action') === 'delete') {
@@ -666,6 +717,7 @@ export function useRealtimeEvents() {
       currentOrg?.id,
       gate,
       inboxRefresh,
+      overviewRefresh,
       invalidate,
       isDuplicateDelivery,
       myId,

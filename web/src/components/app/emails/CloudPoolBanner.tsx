@@ -7,30 +7,40 @@ import React from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowRightIcon, CloudIcon, ExternalLinkIcon, MessagesSquareIcon, ServerIcon, XIcon } from "lucide-react";
 import useCloudPool from "@/hooks/useCloudPool";
-import { COMMUNITY_URL, cloudAddsNeedSubscription } from "@/lib/cloudPlan";
+import useEmails from "@/lib/api/hooks/app/emails/useEmails";
+import { resolveMailboxWarmup, warmupUnknown } from "@/lib/mailboxWarmup";
+import { CLOUD_APP_URL, COMMUNITY_URL, cloudAddsNeedSubscription } from "@/lib/cloudPlan";
 
 // A new key, so instances that dismissed the old free offer see this notice once.
 const DISMISS_KEY = "warmbly.selfHostNotice.dismissed";
 
-export default function CloudPoolBanner({ mailboxCount }: { mailboxCount: number }) {
+// Counts cover the workspace's whole inventory, not the page's search or tag filter.
+export default function CloudPoolBanner() {
     const pool = useCloudPool();
+    const inventory = useEmails({ query: "", tag: "", enabled: pool.connected });
+    const mailboxCount = inventory.emails.length;
+    const enrolled = inventory.emails.filter((mailbox) => pool.rowFor(mailbox.id)?.enrolled).length;
+    const states = inventory.emails.map((mailbox) => resolveMailboxWarmup(mailbox, undefined, pool));
+    const unknown = inventory.isPending || inventory.isLoadingRest || inventory.isError || inventory.isIncomplete || states.some(warmupUnknown);
+    const active = states.filter((state) => state.source === "cloud" && state.activity === "active").length;
     const [dismissed, setDismissed] = React.useState(() => localStorage.getItem(DISMISS_KEY) === "1");
 
     if (!pool.manageable || pool.loading) return null;
+    if (!pool.connected && pool.unavailable) return <p className="text-xs text-slate-500">Cloud warmup status unavailable.</p>;
 
     if (pool.connected) {
         const plan = pool.plan;
         const premium = plan?.tier === "paid";
         const closed = cloudAddsNeedSubscription(plan);
         const subscribeURL = plan?.upgrade_url || plan?.manage_url;
-        if (closed && mailboxCount > pool.enrolledCount) {
+        if (!unknown && closed && mailboxCount > enrolled) {
             return (
                 <Notice
                     icon={ServerIcon}
                     title="New mailboxes warm on this instance, which is not effective."
                     body={
                         <>
-                            {pool.enrolledCount > 0 ? `The ${pool.enrolledCount} already in Warmbly Cloud keep warming there. ` : ""}
+                            {enrolled > 0 ? `The ${enrolled} already in Warmbly Cloud keep warming there. ` : ""}
                             Adding more to the Cloud pool needs a paid Warmbly Cloud plan. Self-hosted instances get no support from Warmbly.
                         </>
                     }
@@ -54,9 +64,9 @@ export default function CloudPoolBanner({ mailboxCount }: { mailboxCount: number
                     <CloudIcon className="w-4 h-4 shrink-0 text-sky-600" />
                     <span className="min-w-0 flex-1 leading-snug">
                         <span className="font-medium">
-                            {pool.enrolledCount === 0
-                                ? "No mailbox is warming in Warmbly Cloud yet."
-                                : `${pool.enrolledCount} of ${mailboxCount} mailboxes warm in Warmbly Cloud.`}
+                            {unknown
+                                ? "Cloud warmup status unavailable."
+                                : `${enrolled} of ${mailboxCount} mailboxes connected to Warmbly Cloud. ${active} warming.`}
                         </span>{" "}
                         <span className="text-slate-500">{premium ? "Premium pool." : closed ? "Free, no new mailboxes." : "Free pool."}</span>
                     </span>
@@ -77,13 +87,17 @@ export default function CloudPoolBanner({ mailboxCount }: { mailboxCount: number
             body={
                 <>
                     It only pairs your own mailboxes, which providers learn to recognise. Warmbly Cloud warms mailboxes in a pool of thousands of real
-                    ones. Self-hosting is for experienced operators, and Warmbly does not provide support for it.
+                    ones. To move, pick a plan on Warmbly Cloud, then bring this workspace over with an export from{" "}
+                    <Link to="/app/settings/data" className="font-medium text-sky-700 hover:text-sky-900 underline underline-offset-2">
+                        Settings &gt; Data
+                    </Link>
+                    . Warmbly does not provide support for self-hosting.
                 </>
             }
             actions={
                 <>
-                    <a href={pool.cloudURL} target="_blank" rel="noreferrer" className={PRIMARY}>
-                        Use Warmbly Cloud
+                    <a href={`${CLOUD_APP_URL}/auth/register?next=${encodeURIComponent(CLOUD_PLANS_PATH)}`} target="_blank" rel="noreferrer" className={PRIMARY}>
+                        Upgrade on Warmbly Cloud
                         <ArrowRightIcon className="w-3 h-3" />
                     </a>
                     <CommunityLink />
@@ -96,6 +110,9 @@ export default function CloudPoolBanner({ mailboxCount }: { mailboxCount: number
         />
     );
 }
+
+// Opens the plan chooser once the account exists; the sign-up page also signs existing users in.
+const CLOUD_PLANS_PATH = "/app/settings/billing?pool=1";
 
 const PRIMARY = "shrink-0 h-7 px-2.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors";
 

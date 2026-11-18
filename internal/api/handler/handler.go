@@ -6,6 +6,8 @@ import (
 	"github.com/warmbly/warmbly/internal/app/adminoutreach"
 	"github.com/warmbly/warmbly/internal/app/advanced"
 	"github.com/warmbly/warmbly/internal/app/advisor"
+	"github.com/warmbly/warmbly/internal/app/agency"
+	"github.com/warmbly/warmbly/internal/app/agencyhome"
 	"github.com/warmbly/warmbly/internal/app/aiagent"
 	"github.com/warmbly/warmbly/internal/app/aitools"
 	"github.com/warmbly/warmbly/internal/app/analytics"
@@ -16,18 +18,23 @@ import (
 	"github.com/warmbly/warmbly/internal/app/attachmentdownload"
 	"github.com/warmbly/warmbly/internal/app/audit"
 	"github.com/warmbly/warmbly/internal/app/auth"
+	"github.com/warmbly/warmbly/internal/app/balance"
 	"github.com/warmbly/warmbly/internal/app/behavior"
 	"github.com/warmbly/warmbly/internal/app/bootstrap"
+	"github.com/warmbly/warmbly/internal/app/brandkit"
 	"github.com/warmbly/warmbly/internal/app/campaign"
 	"github.com/warmbly/warmbly/internal/app/clay"
 	"github.com/warmbly/warmbly/internal/app/cliauth"
+	"github.com/warmbly/warmbly/internal/app/clientreport"
 	"github.com/warmbly/warmbly/internal/app/cloudlink"
 	"github.com/warmbly/warmbly/internal/app/compose"
+	"github.com/warmbly/warmbly/internal/app/connectlink"
 	"github.com/warmbly/warmbly/internal/app/contact"
 	"github.com/warmbly/warmbly/internal/app/contactimport"
 	"github.com/warmbly/warmbly/internal/app/credits"
 	"github.com/warmbly/warmbly/internal/app/crm"
 	"github.com/warmbly/warmbly/internal/app/crmmode"
+	"github.com/warmbly/warmbly/internal/app/crossorgcopy"
 	"github.com/warmbly/warmbly/internal/app/customhost"
 	"github.com/warmbly/warmbly/internal/app/dangerzone"
 	"github.com/warmbly/warmbly/internal/app/delegation"
@@ -37,6 +44,7 @@ import (
 	emailverifyapp "github.com/warmbly/warmbly/internal/app/emailverify"
 	"github.com/warmbly/warmbly/internal/app/feature"
 	"github.com/warmbly/warmbly/internal/app/fleetnode"
+	"github.com/warmbly/warmbly/internal/app/fleetscale"
 	"github.com/warmbly/warmbly/internal/app/form"
 	"github.com/warmbly/warmbly/internal/app/group"
 	"github.com/warmbly/warmbly/internal/app/hubspot"
@@ -45,7 +53,9 @@ import (
 	"github.com/warmbly/warmbly/internal/app/instancesettings"
 	"github.com/warmbly/warmbly/internal/app/integration"
 	"github.com/warmbly/warmbly/internal/app/keystatus"
+	"github.com/warmbly/warmbly/internal/app/leadfinder"
 	"github.com/warmbly/warmbly/internal/app/leadsync"
+	"github.com/warmbly/warmbly/internal/app/mailboxconnect"
 	"github.com/warmbly/warmbly/internal/app/mailboximport"
 	"github.com/warmbly/warmbly/internal/app/mailpush"
 	"github.com/warmbly/warmbly/internal/app/mcp"
@@ -54,6 +64,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/nodescope"
 	"github.com/warmbly/warmbly/internal/app/notification"
 	"github.com/warmbly/warmbly/internal/app/oauth"
+	"github.com/warmbly/warmbly/internal/app/oauthapp"
 	"github.com/warmbly/warmbly/internal/app/opsnotify"
 	"github.com/warmbly/warmbly/internal/app/organization"
 	"github.com/warmbly/warmbly/internal/app/orgrisk"
@@ -63,8 +74,8 @@ import (
 	"github.com/warmbly/warmbly/internal/app/placement"
 	"github.com/warmbly/warmbly/internal/app/planoffer"
 	"github.com/warmbly/warmbly/internal/app/poollink"
+	"github.com/warmbly/warmbly/internal/app/portalhandoff"
 	"github.com/warmbly/warmbly/internal/app/ratelimit"
-	"github.com/warmbly/warmbly/internal/app/referral"
 	"github.com/warmbly/warmbly/internal/app/research"
 	"github.com/warmbly/warmbly/internal/app/salesforce"
 	"github.com/warmbly/warmbly/internal/app/segment"
@@ -79,6 +90,7 @@ import (
 	"github.com/warmbly/warmbly/internal/app/team"
 	"github.com/warmbly/warmbly/internal/app/template"
 	"github.com/warmbly/warmbly/internal/app/token"
+	"github.com/warmbly/warmbly/internal/app/toolmigrate"
 	"github.com/warmbly/warmbly/internal/app/trial"
 	"github.com/warmbly/warmbly/internal/app/twofa"
 	"github.com/warmbly/warmbly/internal/app/tz"
@@ -96,6 +108,7 @@ import (
 	"github.com/warmbly/warmbly/internal/infrastructure/eventbus"
 	"github.com/warmbly/warmbly/internal/pkg/generation"
 	"github.com/warmbly/warmbly/internal/pkg/typesafe"
+	"net/http"
 
 	"github.com/warmbly/warmbly/internal/infrastructure/encryptedkeys"
 	"github.com/warmbly/warmbly/internal/infrastructure/kms"
@@ -146,8 +159,12 @@ type Handler struct {
 	ContactService       contact.ContactService
 	SegmentService       segment.Service
 	FormService          form.Service
-	SequenceService      sequence.SequenceService
-	UniboxService        unibox.UniboxService
+	// ClientReportService keeps shared client reports and their schedules. Nil-safe.
+	ClientReportService clientreport.Service
+	// ConnectLinkService backs client connect links; nil answers client_links_unavailable.
+	ConnectLinkService *connectlink.Service
+	SequenceService    sequence.SequenceService
+	UniboxService      unibox.UniboxService
 
 	FolderService   group.GroupService
 	TagService      group.GroupService
@@ -171,13 +188,21 @@ type Handler struct {
 	SubscriptionService subscription.SubscriptionService
 	StripeService       stripe.StripeService
 	DiscountService     discount.DiscountService
-	ReferralService     referral.Service
-	// PlanOfferService holds private plan offers and credential-free Cloud warmup grants. Nil-safe.
+	// PlanOfferService holds private plan offers. Nil-safe.
 	PlanOfferService planoffer.Service
+	// AgencyService runs agencies, their clients and the shared send pool. Nil-safe.
+	AgencyService *agency.Service
+	// AgencyHomeService reads the agency home and the cross-client inbox. Nil-safe.
+	AgencyHomeService *agencyhome.Service
+	// AgencyKeyService issues agency API keys. Nil-safe.
+	AgencyKeyService *apikey.AgencyKeyService
 
 	// Trial & feature gates
-	TrialService            trial.TrialService
-	FeatureGateService      feature.FeatureGateService
+	TrialService       trial.TrialService
+	FeatureGateService feature.FeatureGateService
+	// MailboxConnectService and MailboxOAuthAppService are the Partnership tools. Nil-safe.
+	MailboxConnectService   *mailboxconnect.Service
+	MailboxOAuthAppService  oauthapp.Service
 	WorkerAssignmentService worker.WorkerAssignmentService
 
 	// Organization & IAM
@@ -242,6 +267,8 @@ type Handler struct {
 
 	// Warmup health
 	WarmupService warmup.Service
+	// WarmupFilterTags is each mailbox's opt-in filter tag for the warmup it receives.
+	WarmupFilterTags *repository.WarmupFilterTagRepository
 
 	// Warmup routing rules — customer-defined preferences for premium-pool
 	// partner selection (e.g. Gmail recipients from Google Workspace senders).
@@ -253,6 +280,7 @@ type Handler struct {
 
 	// AI writing assistant + credit ledger.
 	CreditService    credits.CreditService
+	BalanceService   *balance.Service
 	WritingGenerator generation.WritingGenerator
 
 	// AI provider layer (RunAgent tool-loop backend) + pluggable web search,
@@ -265,9 +293,15 @@ type Handler struct {
 	TypeSafe typesafe.Asker
 	AISearch generation.SearchClient
 
+	// Router is the backend's own router, which the assistant's API tools call through as the caller.
+	Router http.Handler
 	// AITools is the shared tool registry the dashboard agent and MCP server
 	// run on. Handlers bound to the invoking user's permissions.
 	AITools *aitools.Registry
+	// AgencyTools are the agency-wide tools an agency API key sees on the MCP server. Nil-safe.
+	AgencyTools *aitools.AgencyRegistry
+	// ToolMigrations brings data over from other outreach tools. Nil-safe.
+	ToolMigrations toolmigrate.API
 
 	// AIAgentService orchestrates the dashboard agent (sessions, SSE runs,
 	// approvals, per-iteration credits). Nil when no LLM provider is configured.
@@ -350,6 +384,8 @@ type Handler struct {
 	ApolloService *apollo.Service
 	// ClayService takes rows from Clay tables and sends events back to them.
 	ClayService *clay.Service
+	// LeadFinderService finds businesses on a map and turns them into contacts.
+	LeadFinderService *leadfinder.Service
 
 	// Public websocket URL used by frontend clients
 	WebsocketURI string
@@ -394,6 +430,12 @@ type Handler struct {
 	CustomDomains repository.CustomDomainRepository
 	// CustomHosts confines a workspace's custom host to that workspace's forms and tracked links.
 	CustomHosts *customhost.Checker
+	// BrandService stores workspace and agency brands; its resolver is what public pages show.
+	BrandService *brandkit.Service
+	// PortalHandoff signs clients in to a portal from the main address; nil answers 404.
+	PortalHandoffs *portalhandoff.Service
+	// CrossOrgCopy copies campaigns and templates into the caller's other workspaces.
+	CrossOrgCopy *crossorgcopy.Service
 
 	// Direct repositories used by handlers that don't yet have a
 	// service layer (avatars, etc.). Keep narrow and add a service
@@ -434,7 +476,9 @@ type Handler struct {
 	AdminSendsRepo   repository.AdminSendsRepository
 	AdminFleetRepo   repository.AdminFleetRepository
 	AdminInsightRepo repository.AdminInsightRepository
-	JobRuns          repository.JobRunRepository
+	// FleetScale moves the worker Auto Scaling Group's cap; nil unless FLEET_AUTOSCALING_GROUP is set.
+	FleetScale *fleetscale.Service
+	JobRuns    repository.JobRunRepository
 	// WebhookRepo backs the operator's "reclaim stuck deliveries" action.
 	WebhookRepo repository.WebhookRepository
 

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/warmbly/warmbly/internal/models"
 )
 
 // Additional Topics for realtime updates
@@ -71,6 +72,8 @@ const (
 
 	// A human reply landed for a campaign contact (org-scoped pulse).
 	EventEmailReplied EventType = "EMAIL_REPLIED"
+	// A bounce or complaint was recorded against a campaign send (org-scoped pulse).
+	EventEmailBounced EventType = "EMAIL_BOUNCED"
 
 	// A website page view landed for an identified contact (org-scoped; the
 	// dashboard refreshes that contact's timeline).
@@ -884,14 +887,18 @@ func (p *StreamingPublisher) PublishAIDraftReady(ctx context.Context, orgID, act
 // balance that tripped the alert and the org's configured threshold.
 type CreditsLowEvent struct {
 	BaseEvent
-	OrgID     string `json:"org_id"`
-	Balance   int    `json:"balance"`
-	Threshold int    `json:"threshold"`
+	OrgID        string  `json:"org_id"`
+	Balance      int     `json:"balance"`
+	Threshold    int     `json:"threshold"`
+	BalanceUSD   float64 `json:"balance_usd"`
+	ThresholdUSD float64 `json:"threshold_usd"`
+	// Out is true when the balance ran out rather than ran low.
+	Out bool `json:"out"`
 }
 
 // PublishCreditsLow emits BILLING_CREDITS_LOW when an org's spendable balance
 // crosses under its alert threshold. Best-effort, system-fired (no actor).
-func (p *StreamingPublisher) PublishCreditsLow(ctx context.Context, orgID uuid.UUID, balance, threshold int) {
+func (p *StreamingPublisher) PublishCreditsLow(ctx context.Context, orgID uuid.UUID, balance, threshold models.Micro, out bool) {
 	if p == nil || p.client == nil || orgID == uuid.Nil {
 		return
 	}
@@ -901,9 +908,12 @@ func (p *StreamingPublisher) PublishCreditsLow(ctx context.Context, orgID uuid.U
 			UserID:    uuid.Nil.String(),
 			Timestamp: time.Now(),
 		},
-		OrgID:     orgID.String(),
-		Balance:   balance,
-		Threshold: threshold,
+		OrgID:        orgID.String(),
+		Balance:      models.CreditsFromMicro(balance),
+		Threshold:    models.CreditsFromMicro(threshold),
+		BalanceUSD:   balance.USD(),
+		ThresholdUSD: threshold.USD(),
+		Out:          out,
 	}
 	attrs := map[string]string{
 		"user_id":    uuid.Nil.String(),
@@ -919,13 +929,14 @@ func (p *StreamingPublisher) PublishCreditsLow(ctx context.Context, orgID uuid.U
 // the spendable balance after a debit, so credit meters update live.
 type CreditsChangedEvent struct {
 	BaseEvent
-	OrgID   string `json:"org_id"`
-	Balance int    `json:"balance"`
+	OrgID      string  `json:"org_id"`
+	Balance    int     `json:"balance"`
+	BalanceUSD float64 `json:"balance_usd"`
 }
 
 // PublishCreditsChanged emits BILLING_CREDITS_CHANGED after a fresh credit
 // debit. Best-effort, system-fired (no actor).
-func (p *StreamingPublisher) PublishCreditsChanged(ctx context.Context, orgID uuid.UUID, balance int) {
+func (p *StreamingPublisher) PublishCreditsChanged(ctx context.Context, orgID uuid.UUID, balance models.Micro) {
 	if p == nil || p.client == nil || orgID == uuid.Nil {
 		return
 	}
@@ -935,8 +946,9 @@ func (p *StreamingPublisher) PublishCreditsChanged(ctx context.Context, orgID uu
 			UserID:    uuid.Nil.String(),
 			Timestamp: time.Now(),
 		},
-		OrgID:   orgID.String(),
-		Balance: balance,
+		OrgID:      orgID.String(),
+		Balance:    models.CreditsFromMicro(balance),
+		BalanceUSD: balance.USD(),
 	}
 	attrs := map[string]string{
 		"user_id":    uuid.Nil.String(),
@@ -1183,6 +1195,37 @@ func (p *StreamingPublisher) PublishEmailReplied(ctx context.Context, orgID, use
 		ContactID:    contactID,
 		ContactEmail: contactEmail,
 		SequenceID:   sequenceID,
+	})
+}
+
+// PublishEmailBounced emits an org-scoped EMAIL_BOUNCED pulse when a bounce or
+// complaint is recorded against a campaign send after it went out.
+func (p *StreamingPublisher) PublishEmailBounced(ctx context.Context, orgID, userID, campaignID, contactID, contactEmail, sequenceID string) {
+	if p == nil || p.client == nil {
+		return
+	}
+	p.PublishTrackingEvent(ctx, &TrackingEventPayload{
+		BaseEvent:    BaseEvent{EventType: EventEmailBounced, UserID: userID},
+		OrgID:        orgID,
+		CampaignID:   campaignID,
+		ContactID:    contactID,
+		ContactEmail: contactEmail,
+		SequenceID:   sequenceID,
+	})
+}
+
+// PublishCampaignPaused emits an org-scoped CAMPAIGN_PAUSED pulse for a pause
+// nobody clicked, such as the deliverability breaker.
+func (p *StreamingPublisher) PublishCampaignPaused(ctx context.Context, orgID, userID, campaignID, name string) {
+	if p == nil || p.client == nil {
+		return
+	}
+	p.PublishCampaignEvent(ctx, &CampaignEvent{
+		BaseEvent:  BaseEvent{EventType: EventCampaignPaused, UserID: userID},
+		OrgID:      orgID,
+		CampaignID: campaignID,
+		Name:       name,
+		Status:     "paused",
 	})
 }
 

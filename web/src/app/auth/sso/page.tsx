@@ -16,7 +16,11 @@ import { takeSSOBinding } from "@/lib/api/client/auth/beginSSO";
 import getUser from "@/lib/api/client/auth/getUser";
 import { saveTokens } from "@/lib/auth";
 import buildError from "@/lib/helper/buildError";
+import { postAuthNext, takeSSONext } from "@/lib/helper/safeNext";
+import { hrefTarget } from "@/lib/routerSearch";
 import type { AppError } from "@/lib/api/client/normalizeError";
+import { goToPortal, takePortalHandoff } from "@/lib/portalHandoff";
+import { portalHostParam } from "@/lib/portal";
 
 export default function SSOCallbackPage() {
     const [params] = useSearchParams();
@@ -38,6 +42,9 @@ export default function SSOCallbackPage() {
         }
 
         (async () => {
+            const next = takeSSONext();
+            // A sign-in begun for an agency portal finishes there.
+            const portal = portalHostParam(takePortalHandoff()) || undefined;
             try {
                 const session = await exchangeSSO(code, takeSSOBinding());
 
@@ -50,7 +57,7 @@ export default function SSOCallbackPage() {
                         setError("Two-factor authentication is required, but the challenge did not arrive. Try signing in again.");
                         return;
                     }
-                    navigate({ to: "/auth/login", replace: true, state: { two_fa_pending: session.pending_token } });
+                    navigate({ to: "/auth/login", search: { next, portal }, replace: true, state: { two_fa_pending: session.pending_token } });
                     return;
                 }
                 // The provider's address already belongs to an account with a
@@ -63,6 +70,7 @@ export default function SSOCallbackPage() {
                     }
                     navigate({
                         to: "/auth/login",
+                        search: { next, portal },
                         replace: true,
                         state: {
                             sso_link: {
@@ -79,6 +87,10 @@ export default function SSOCallbackPage() {
                     return;
                 }
 
+                if (portal) {
+                    await goToPortal(portal, session.access_token);
+                    return;
+                }
                 saveTokens(session as unknown as Record<string, unknown>);
                 queryClient.clear();
                 try {
@@ -86,7 +98,7 @@ export default function SSOCallbackPage() {
                 } catch {
                     // UserProvider retries and redirects on a genuine failure.
                 }
-                navigate({ to: "/app/emails", replace: true });
+                navigate({ ...hrefTarget(postAuthNext(next)), replace: true });
             } catch (err) {
                 setError(buildError(err as AppError));
             }

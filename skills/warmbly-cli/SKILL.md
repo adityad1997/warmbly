@@ -83,6 +83,8 @@ gives the arguments and flags. Ids are positional, not flags.
 | `placement` | inbox placement tests: overview, test, list, view, cancel, seed inboxes, a campaign's scheduled test, batches across many mailboxes, fleet coverage |
 | `webhook`, `key`, `oauth-app`, `integration` | the developer surface |
 | `org`, `team`, `settings`, `warmup-routing` | the workspace surface a key can reach |
+| `migration` | migrate in from another outreach tool: providers, list, view, create, start, cancel, link-senders, delete |
+| `agency` | an agency's clients, overview, usage, mailboxes, and `agency migration` into client workspaces |
 | `tool` | the AI tool registry, listed and called |
 | `events tail` | the live event stream |
 | `api` | any endpoint at all |
@@ -117,6 +119,13 @@ Everything else is safe to run freely.
   is the answer: today's projected sends and every limit that lowered them
   (easing out of warmup, the campaign limit, other campaigns on the same
   mailboxes, the plan's allowance, leads due). Read it before touching a cap.
+- To send each lead inside their own working day, set the campaign's
+  `timezone_mode` to `recipient`, then run `warmbly campaign timezones
+  CAMPAIGN_ID`: its leads by timezone and how many have no location (those are
+  sent on the campaign's own timezone). Location comes from the contacts'
+  country, state, city, location or timezone fields, then phone and email
+  domain; segment conditions `world_region`, `country` and `timezone` split an
+  audience by it.
 - Never raise a mailbox's daily cap casually. The default is 50 campaign
   emails per mailbox per day with 600 seconds between sends; a fresh mailbox
   starts around 10-20. Do not go above 50 unless the user asked and the
@@ -155,6 +164,42 @@ Everything else is safe to run freely.
   and `batch-senders BATCH_ID` lists mailboxes worst first: a whole domain low
   is that domain, one mailbox low on a healthy domain is that mailbox.
 
+## Migrating in from another tool
+
+```bash
+warmbly migration providers --json            # field keys each tool needs
+printf '{"provider":"smartlead","credentials":[{"api_key":"%s"}]}' "$SMARTLEAD_API_KEY" \
+  | warmbly migration create --input - --json
+warmbly migration view MIGRATION_ID --json     # wait for status "ready", read the inventory
+warmbly migration start MIGRATION_ID --kinds blocklist,campaigns,leads --in-flight continue
+```
+
+- Never put the source key on the command line or in a file you leave behind;
+  pipe it in. The server seals it, never returns it, and wipes it when the
+  migration ends.
+- Show the user the scanned inventory before `start`, and ask before
+  `--warmup`: it starts warmup mail on every mailbox that connects.
+- Imported campaigns are drafts. They never launch on their own; leave
+  launching to the user (`campaign preflight`, then `campaign start`).
+- Mailboxes the migration could not connect are listed under each target's
+  follow-up; after the user reconnects them, `migration link-senders` attaches
+  them to the drafts.
+
+## Agencies
+
+An agency key (`wmagency_...`) goes in `WARMBLY_TOKEN`; `auth login` takes
+workspace keys only.
+
+- `warmbly agency list` gives the agency id; `agency clients list AGENCY_ID`
+  the client workspace ids.
+- Any other command acts in one client with `--organization CLIENT_ID` (or
+  `WARMBLY_ORGANIZATION`). Without it, a workspace command answers
+  `agency_key_organization_required`.
+- `agency migration start AGENCY_ID MIGRATION_ID --input @targets.json` maps
+  every scanned source workspace to `organization_id`, `create_name` or
+  `skip`. Creating a client needs `AGENCY_MANAGE_CLIENTS`; confirm new client
+  names with the user first.
+
 ## Errors
 
 Failures print the API's `code` and `request_id` to stderr. Branch on `code`
@@ -163,6 +208,9 @@ when reporting. On `rate_limit_exceeded`, wait the `Retry-After` it names.
 
 For a write you retry, pass `--idempotency-key <same-key>` so a retry cannot
 double-apply. Any unique string works; reuse it only for the identical retry.
+A `409 idempotency_outcome_unknown` means the first attempt ended in a server
+error and may have applied: retry with a new key only once you have established
+that it did not.
 
 Exit codes: `0` worked, `1` failed, `2` bad command line or a prompt with no
 terminal, `4` credential.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -123,6 +124,9 @@ type ThreadParent struct {
 	// SubjectSent marks Subject as recorded off a send, already rendered for
 	// this contact; otherwise it is the opening step's template.
 	SubjectSent bool
+	// References is every Message-ID of the conversation the contact received,
+	// oldest first and ending with MessageID, whichever mailbox sent each.
+	References []string
 }
 
 // CampaignProgressRepository defines methods for campaign progress tracking
@@ -144,7 +148,7 @@ type CampaignProgressRepository interface {
 	//
 	// arm is the step A/B arm this send carries, nil when no split ran; it is
 	// rewritten on every claim so it always names the copy actually sent.
-	ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID, senderID uuid.UUID, newLead bool, arm *models.StepABArm) (bool, error)
+	ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID, senderID uuid.UUID, newLead bool, arm *models.StepABArm, tracking models.SendTracking) (bool, error)
 	// ReleaseSend gives a reservation back when the send provably never reached
 	// the bus (no worker assigned, worker offline), so the step is retried on the
 	// next tick without spending an attempt. Only an unstamped reservation is
@@ -296,7 +300,7 @@ type CampaignProgressRepository interface {
 	// waitingOnSender reports that the returned next-due moment is a lead
 	// waiting for its own mailbox rather than for a step's wait or a condition
 	// window, so the caller can say which.
-	FindRoutedPairs(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool, paced PacedSenders, limit int) (pairs []ContactSequencePair, nextDue *time.Time, waitingOnSender bool, err error)
+	FindRoutedPairs(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool, paced PacedSenders, open *OpenClocks, limit int) (pairs []ContactSequencePair, nextDue *time.Time, waitingOnSender bool, err error)
 	// RouteContact runs the same routing for ONE contact and reports where
 	// their flow goes next, plus the pre-send gate that excludes them, so a
 	// per-contact preview reads the facts the send path reads.
@@ -389,7 +393,7 @@ func NewCampaignProgressRepository(db *pgxpool.Pool) CampaignProgressRepository 
 // flight (dispatched_at set) or already sent updates nothing and returns no
 // row, so two ticks that picked the same pair cannot both dispatch. A step
 // walked back after a worker failure has both cleared and is claimable again.
-func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID, senderID uuid.UUID, newLead bool, arm *models.StepABArm) (bool, error) {
+func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID, contactID, sequenceID, taskID, senderID uuid.UUID, newLead bool, arm *models.StepABArm, tracking models.SendTracking) (bool, error) {
 	tx, err := beginResultTx(ctx, r.db)
 	if err != nil {
 		return false, err
@@ -405,15 +409,15 @@ func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID
 
 	var claimed bool
 	err = tx.QueryRow(ctx, `
-		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, dispatched_at, dispatch_task_id, ab_arm, ab_variant_id)
-		VALUES ($1, $2, $3, NOW(), $4, $5, $6)
+		INSERT INTO campaign_contact_progress (campaign_id, contact_id, sequence_id, dispatched_at, dispatch_task_id, ab_arm, ab_variant_id, open_tracked, click_tracked)
+		VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8)
 		ON CONFLICT (campaign_id, contact_id, sequence_id)
 		DO UPDATE SET dispatched_at = NOW(), dispatch_task_id = $4, failed_at = NULL, failure_reason = '',
-		              ab_arm = $5, ab_variant_id = $6
+		              ab_arm = $5, ab_variant_id = $6, open_tracked = $7, click_tracked = $8
 		WHERE campaign_contact_progress.sent_at IS NULL
 		  AND campaign_contact_progress.dispatched_at IS NULL
 		RETURNING true
-	`, campaignID, contactID, sequenceID, taskID, armKind, armVariant).Scan(&claimed)
+	`, campaignID, contactID, sequenceID, taskID, armKind, armVariant, tracking.Opens, tracking.Clicks).Scan(&claimed)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -450,9 +454,9 @@ func (r *campaignProgressRepository) ReserveSend(ctx context.Context, campaignID
 
 	// Bind the lead to the mailbox this send leaves from. Written with the
 	// claim, so the binding exists for every send that was ever dispatched and
-	// for none that was not. Re-stated on every step: the placer only hands a
-	// different mailbox when the bound one is gone, and that decision is what
-	// this records.
+	// for none that was not. Re-stated on every step, so it always names the
+	// latest sender: the placer hands a different mailbox when the bound one
+	// is gone or the campaign rotates follow-ups.
 	if senderID != uuid.Nil {
 		if _, err := tx.Exec(ctx, `
 			UPDATE campaign_leads
@@ -726,8 +730,9 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 
 	var parent *ThreadParent
 	var subject string
-	var recorded bool
-	for rows.Next() {
+	var recorded, subjectDone, chainDone bool
+	var chain []string
+	for rows.Next() && !(subjectDone && chainDone) {
 		var (
 			messageID, threadID, stepSubject string
 			sentSubject                      *string
@@ -740,10 +745,18 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 		if parent == nil {
 			parent = &ThreadParent{MessageID: messageID, ThreadID: threadID, SenderID: senderID}
 		}
+		// The conversation is every send back to the step that opened it.
+		if !chainDone {
+			chain = append(chain, messageID)
+			chainDone = !stepKnown || !threadReply
+		}
+		if subjectDone {
+			continue
+		}
 		// A recorded subject is the conversation's as sent, whichever A/B arm it came from.
 		if sentSubject != nil && *sentSubject != "" {
-			subject, recorded = *sentSubject, true
-			break
+			subject, recorded, subjectDone = *sentSubject, true, true
+			continue
 		}
 		// A step that has since been deleted (campaign_tasks.sequence_id is
 		// ON DELETE SET NULL) says nothing about whether it opened a thread or
@@ -752,7 +765,8 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 		// than filing this send in a conversation under a subject that may
 		// belong to a different one.
 		if !stepKnown {
-			break
+			subjectDone = true
+			continue
 		}
 		// Walking back from the parent, the first step that did NOT reply in a
 		// thread is the one that opened this conversation, and its subject is
@@ -760,9 +774,7 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 		// blank subject of the second (which inherited it in turn) instead of
 		// the subject the recipient is actually looking at.
 		subject = stepSubject
-		if !threadReply {
-			break
-		}
+		subjectDone = !threadReply
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -771,6 +783,8 @@ func (r *campaignProgressRepository) ThreadParentForLead(ctx context.Context, ca
 		return nil, nil
 	}
 	parent.Subject, parent.SubjectSent = subject, recorded
+	slices.Reverse(chain)
+	parent.References = chain
 	return parent, nil
 }
 
@@ -1404,7 +1418,7 @@ func undeliverableClause(cp string) string {
 // lead is offered, and the placer moves it to another mailbox.
 //
 // Returns no pairs and a nil next-due when the campaign is genuinely complete.
-func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool, paced PacedSenders, limit int) ([]ContactSequencePair, *time.Time, bool, error) {
+func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campaignID uuid.UUID, orderBy, orderDir, orderField string, prioritizeNewLeads, excludeNewLeads bool, paced PacedSenders, open *OpenClocks, limit int) ([]ContactSequencePair, *time.Time, bool, error) {
 	if limit < 1 {
 		limit = 1
 	}
@@ -1458,9 +1472,15 @@ func (r *campaignProgressRepository) FindRoutedPairs(ctx context.Context, campai
 		dir = "DESC"
 	}
 	orderPrefix := ""
+	if open != nil {
+		// A recipient-local campaign tries first the leads whose own day is open,
+		// ahead of new-lead priority: a lead at night cannot be sent either way.
+		p1args = append(p1args, open.Zones, open.Unknown)
+		orderPrefix = fmt.Sprintf("COALESCE(c.location_timezone = ANY($%d::text[]) OR (c.location_timezone = '' AND $%d::bool), false) DESC, ", len(p1args)-1, len(p1args))
+	}
 	if prioritizeNewLeads {
 		// Priority needs existence, not the last sent step or its per-lead sort.
-		orderPrefix = `NOT EXISTS (
+		orderPrefix += `NOT EXISTS (
 			SELECT 1 FROM campaign_contact_progress p
 			WHERE p.campaign_id = $1 AND p.contact_id = cl.contact_id AND p.sent_at IS NOT NULL
 		) DESC, `
@@ -1918,6 +1938,14 @@ func (in routeInput) heldShift(now time.Time) time.Duration {
 // by warmup health is absent, so the leads bound to it are routed and moved
 // off it rather than left waiting for a return that is not coming.
 type PacedSenders map[uuid.UUID]time.Time
+
+// OpenClocks names the lead clocks a recipient-local campaign can send on now:
+// the zones whose window is open, and whether the campaign's own is (the clock
+// of a lead with no known zone). Routing tries those leads first.
+type OpenClocks struct {
+	Zones   []string
+	Unknown bool
+}
 
 // reopening reports when a lead's bound mailbox is expected back, and whether
 // it is paced at all. An unassigned lead is never paced: rotation is still

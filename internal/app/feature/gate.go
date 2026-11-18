@@ -52,9 +52,19 @@ type FeatureGateService interface {
 	// product (sending, inbox, AI, integrations). The Warmup plan does not.
 	IsPaidOrganization(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
 
+	// HasPartnership reports the Partnership plan in force; a self-hosted instance has no plans, so never.
+	HasPartnership(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
+
+	// CanUsePartnerTools gates the Partnership tools (mailbox connect API, own OAuth apps, placement tests).
+	CanUsePartnerTools(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
+
 	// HasPremiumWarmup reports whether the organization pays for any plan,
 	// the Warmup plan included, which is what the premium pool follows.
 	HasPremiumWarmup(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error)
+
+	// ContactLimit is the most contacts the organization may hold: an operator
+	// override, else its plan's, else the product cap. 0 means no ceiling.
+	ContactLimit(ctx context.Context, orgID uuid.UUID) (int, *errx.Error)
 
 	// GetStorageLimitBytes returns the org's total attachment storage quota in
 	// bytes (generous; larger for paid orgs).
@@ -95,7 +105,18 @@ type featureGateService struct {
 	// increase raises what the sender enforces and not only what the
 	// dashboard shows. Nil when not wired.
 	overrides LimitOverrideReader
+	// agencyPool decides the daily cap of an agency's client workspaces. Nil when not wired.
+	agencyPool AgencyPool
 }
+
+// AgencyPool is the shared monthly send pool of agency clients. ok false
+// leaves the decision to the workspace's own plan.
+type AgencyPool interface {
+	DailyLimit(ctx context.Context, orgID uuid.UUID) (limit int, ok bool)
+}
+
+// WireAgencyPool attaches the agency pool after construction.
+func (s *featureGateService) WireAgencyPool(p AgencyPool) { s.agencyPool = p }
 
 // PoolLinkReader answers whether a workspace has a live self-hosted link.
 type PoolLinkReader interface {
@@ -217,6 +238,12 @@ func (s *featureGateService) CanAddInbox(ctx context.Context, orgID uuid.UUID, c
 
 // GetDailyEmailLimit returns the daily email limit for an organization
 func (s *featureGateService) GetDailyEmailLimit(ctx context.Context, orgID uuid.UUID) (int, *errx.Error) {
+	// An agency client sends from the agency's monthly pool, not a daily plan cap.
+	if s.agencyPool != nil {
+		if limit, ok := s.agencyPool.DailyLimit(ctx, orgID); ok {
+			return limit, nil
+		}
+	}
 	if s.selfHost {
 		return UnlimitedEmails, nil
 	}
@@ -307,6 +334,36 @@ func (s *featureGateService) GetSubscriptionStatus(ctx context.Context, orgID uu
 	return status, nil
 }
 
+// ContactLimit has no ceiling on a self-host unless an operator set one, whose seeded trial plan is not a limit.
+func (s *featureGateService) ContactLimit(ctx context.Context, orgID uuid.UUID) (int, *errx.Error) {
+	if s.overrides != nil {
+		o, err := s.overrides.GetOrganizationLimitOverrides(ctx, orgID)
+		if err != nil {
+			return 0, errx.New(errx.Internal, "failed to load limit overrides")
+		}
+		if o != nil && o.MaxContacts > 0 {
+			return o.MaxContacts, nil
+		}
+	}
+	if s.selfHost {
+		return 0, nil
+	}
+	sub, err := s.subRepo.GetByOrganizationID(ctx, orgID)
+	if err != nil {
+		return 0, errx.New(errx.Internal, "failed to get subscription")
+	}
+	if sub != nil {
+		plan, err := s.planRepo.GetByID(ctx, sub.EffectivePlanID())
+		if err != nil {
+			return 0, errx.New(errx.Internal, "failed to get plan")
+		}
+		if plan != nil && plan.MaxContacts > 0 {
+			return int(plan.MaxContacts), nil
+		}
+	}
+	return config.HardCapContacts, nil
+}
+
 // GetStorageLimitBytes returns the attachment quota: the larger pool only on a plan that sends.
 func (s *featureGateService) GetStorageLimitBytes(ctx context.Context, orgID uuid.UUID) (int64, *errx.Error) {
 	if s.selfHost {
@@ -385,4 +442,22 @@ func (s *featureGateService) HasPremiumWarmup(ctx context.Context, orgID uuid.UU
 		return false, errx.New(errx.Internal, "failed to get subscription")
 	}
 	return sub != nil && sub.HasPaidSubscription(), nil
+}
+
+func (s *featureGateService) HasPartnership(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error) {
+	if s.selfHost {
+		return false, nil
+	}
+	sub, err := s.subRepo.GetByOrganizationID(ctx, orgID)
+	if err != nil {
+		return false, errx.New(errx.Internal, "failed to get subscription")
+	}
+	return sub != nil && sub.IsPartnership(), nil
+}
+
+func (s *featureGateService) CanUsePartnerTools(ctx context.Context, orgID uuid.UUID) (bool, *errx.Error) {
+	if s.selfHost {
+		return true, nil
+	}
+	return s.HasPartnership(ctx, orgID)
 }

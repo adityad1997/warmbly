@@ -3,6 +3,13 @@ export function isValidCampaignDailyLimit(value: number, savedValue?: number): b
     return Number.isInteger(value) && ((value >= 3 && value <= 5000) || (value <= 0 && value === savedValue));
 }
 
+/** Which mailbox a lead's follow-ups leave from: the one that sent the first
+ *  email, another on its domain, or any mailbox rotation picks. */
+export type FollowUpSender = 'same' | 'same_domain' | 'rotate';
+
+/** campaign reads the schedule in the campaign's timezone; recipient in each lead's. */
+export type TimezoneMode = 'campaign' | 'recipient';
+
 export default interface Campaign {
     id: string;
 
@@ -30,6 +37,8 @@ export default interface Campaign {
     timezone: string;
     /** The zone actually in use: timezone when set, else the workspace's, else UTC. Read-only. */
     effective_timezone?: string;
+    /** Whose clock the schedule is read on: the campaign's, or each lead's own ("recipient"). */
+    timezone_mode: TimezoneMode;
     days: number;
     start_time: string;
     end_time: string;
@@ -54,6 +63,8 @@ export default interface Campaign {
     // "explicit" uses the campaign's sender pool (edited via the senders endpoint).
     sender_strategy: 'tags' | 'explicit';
     rotation_mode: 'weighted' | 'round_robin' | 'least_recently_used';
+    // Which mailbox a lead's follow-ups leave from.
+    follow_up_sender: FollowUpSender;
     senders?: CampaignSender[];
 
     // Per-campaign daily ramp-up. ramp_level/ramp_level_date are server-managed.
@@ -63,6 +74,8 @@ export default interface Campaign {
     ramp_ceiling: number;
     ramp_level: number;
     ramp_level_date?: Date | null;
+    // Mailboxes leaving warmup earn volume from replies. Absent from an older backend, which means on.
+    warmup_graduation?: boolean;
 
     // Match the sending mailbox provider to the recipient's provider.
     esp_match_mode: 'off' | 'prefer' | 'strict';

@@ -17,6 +17,7 @@ import (
 	"github.com/warmbly/warmbly/internal/errx"
 	"github.com/warmbly/warmbly/internal/models"
 	"github.com/warmbly/warmbly/internal/pkg/emailverify"
+	"github.com/warmbly/warmbly/internal/pkg/geo"
 	"github.com/warmbly/warmbly/internal/pkg/listquality"
 	"github.com/warmbly/warmbly/internal/pkg/spreadsheet"
 	"github.com/warmbly/warmbly/internal/pkg/typesafe"
@@ -535,7 +536,7 @@ func (s *contactService) runImport(ctx context.Context, plan *importPlan, rows [
 	// Ask about the plan ceiling once for the whole batch. Per chunk it would
 	// report the same plan problem 500 times, which is what the row-level
 	// error list is explicitly not for.
-	if xerr := s.checkContactLimit(ctx, plan.userID, countNew(parsed, existing, elsewhere)); xerr != nil {
+	if xerr := s.checkContactLimit(ctx, plan.orgID, countNew(parsed, existing, elsewhere)); xerr != nil {
 		return nil, xerr
 	}
 
@@ -839,7 +840,10 @@ func (s *contactService) AnalyzeImport(ctx context.Context, userID string, orgID
 	// What would refuse the whole import is said now, not after the upload.
 	if xerr := repository.ValidateImportCategoryNames(titles); xerr != nil {
 		out.Problem = xerr.Message
-	} else if xerr := s.checkContactLimit(ctx, userID, out.New); xerr != nil {
+	} else if xerr := s.checkContactLimit(ctx, orgID, out.New); xerr != nil {
+		if xerr.Code == errx.Internal {
+			return nil, xerr
+		}
 		out.Problem = xerr.Message
 	}
 	return out, nil
@@ -1085,7 +1089,39 @@ func suggestMapping(headers []string, sample [][]string, shapes []importmap.Shap
 	// cannot go without.
 	matchEmailByValues(out, shapes)
 	matchExistingCustomFields(out, headers, existingKeys)
+	matchLocationColumns(out, headers, existingKeys)
 	return out
+}
+
+// matchLocationColumns keeps the columns that say where a contact is (country,
+// state, city, location, timezone) instead of dropping them, under the key the
+// location resolver reads, so recipient-local sending and the location segment
+// fields work from the import alone.
+func matchLocationColumns(out []models.ContactImportColumnMapping, headers, existingKeys []string) {
+	claimed := map[string]bool{}
+	for _, m := range out {
+		if m.Target == models.ContactImportTargetCustom {
+			claimed[FoldCustomFieldKey(m.CustomKey)] = true
+		}
+	}
+	spelling := make(map[string]string, len(existingKeys))
+	for _, k := range existingKeys {
+		spelling[FoldCustomFieldKey(k)] = k
+	}
+	for i, h := range headers {
+		if out[i].Target != models.ContactImportTargetIgnore {
+			continue
+		}
+		key, ok := geo.CanonicalFieldKey(h)
+		if !ok || claimed[FoldCustomFieldKey(key)] {
+			continue
+		}
+		claimed[FoldCustomFieldKey(key)] = true
+		if existing, ok := spelling[FoldCustomFieldKey(key)]; ok {
+			key = existing
+		}
+		out[i] = models.ContactImportColumnMapping{Index: i, Target: models.ContactImportTargetCustom, CustomKey: key}
+	}
 }
 
 // matchEmailByValues maps the first column of addresses to Email when no

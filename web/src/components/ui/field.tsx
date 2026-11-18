@@ -18,6 +18,7 @@ const base =
 
 export function TextInput({
     value,
+    id,
     onChange,
     placeholder,
     type = "text",
@@ -32,6 +33,8 @@ export function TextInput({
     maxLength,
 }: {
     value: string;
+    // Names the field for a <Label htmlFor>.
+    id?: string;
     onChange: (v: string) => void;
     placeholder?: string;
     type?: string;
@@ -55,6 +58,7 @@ export function TextInput({
 }) {
     return (
         <input
+            id={id}
             type={type}
             value={value}
             placeholder={placeholder}
@@ -128,9 +132,9 @@ export function SearchInput({
     );
 }
 
-export function Label({ children, className }: { children: React.ReactNode; className?: string }) {
+export function Label({ children, className, htmlFor }: { children: React.ReactNode; className?: string; htmlFor?: string }) {
     return (
-        <label className={cn(
+        <label htmlFor={htmlFor} className={cn(
             "text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium block mb-1.5",
             className,
         )}>
@@ -165,6 +169,7 @@ export function FieldRow({ children, className }: { children: React.ReactNode; c
 // inside the field, before the steppers.
 export function NumberInput({
     value,
+    id,
     onChange,
     onCommit,
     min,
@@ -192,6 +197,7 @@ export function NumberInput({
     suffix?: React.ReactNode;
     align?: "left" | "right" | "center";
     className?: string;
+    id?: string;
 }) {
     const clamp = (n: number) => {
         if (Number.isNaN(n)) return min ?? 0;
@@ -217,6 +223,7 @@ export function NumberInput({
             )}
         >
             <input
+                id={id}
                 type="number"
                 inputMode="numeric"
                 value={Number.isFinite(value) ? value : ""}

@@ -13,6 +13,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import toast from "react-hot-toast/headless";
 import {
     AlertOctagonIcon,
+    ArrowRightLeftIcon,
     BellIcon,
     BoxesIcon,
     BriefcaseIcon,
@@ -20,7 +21,7 @@ import {
     CloudIcon,
     DatabaseIcon,
     GaugeIcon,
-    GiftIcon,
+    KeyRoundIcon,
     Loader2Icon,
     PlugIcon,
     ShieldCheckIcon,
@@ -31,6 +32,7 @@ import {
     UsersIcon,
     WebhookIcon,
     GlobeIcon,
+    PaletteIcon,
     TagsIcon,
 } from "lucide-react";
 import { UnsavedProvider, useUnsavedRegistry } from "@/hooks/context/unsaved";
@@ -39,6 +41,7 @@ import { Page, PageTopbar } from "@/components/layout/Page";
 import useFeatureAccess from "@/hooks/useFeatureAccess";
 import useAuthConfig from "@/lib/api/hooks/auth/useAuthConfig";
 import { useCloudLinkStatus, usePoolLinkInstances } from "@/lib/api/hooks/app/cloudlink/useCloudLink";
+import { useMailboxOAuthApps } from "@/lib/api/hooks/app/emails/useMailboxOAuthApps";
 
 interface SectionDef {
     path: string;
@@ -54,6 +57,8 @@ interface SectionDef {
     hostedDescription?: string;
     /** Open to a member restricted to selected resources: their own account only. */
     scoped?: boolean;
+    /** Only on the Partnership plan, or while the workspace keeps an app it saved. */
+    partnerOnly?: boolean;
 }
 
 interface SectionGroup {
@@ -79,16 +84,17 @@ const GROUPS: SectionGroup[] = [
             { path: "workspace", label: "Workspace", icon: BriefcaseIcon, description: "Org-wide settings.", ownerOnly: true },
             { path: "sending", label: "Sending", icon: SendIcon, description: "When campaign mail reaches each recipient.", permission: "MANAGE_SETTINGS" },
             { path: "tracking", label: "Website tracking", icon: GlobeIcon, description: "Page views on your site, in the contact timeline.", permission: "MANAGE_SETTINGS" },
+            { path: "branding", label: "Branding", icon: PaletteIcon, description: "Your brand and domain on the pages clients see.", permission: "MANAGE_SETTINGS" },
             { path: "inbox-tagging", label: "Inbox tagging", icon: TagsIcon, description: "Label and score inbound mail automatically.", permission: "VIEW_ANALYTICS" },
             { path: "ai-skills", label: "AI skills", icon: SparklesIcon, description: "Playbooks your AI features follow.", permission: "MANAGE_SETTINGS" },
-            { path: "billing", label: "Billing", icon: CreditCardIcon, description: "Plan, payment, invoices.", ownerOnly: true, billingOnly: true },
-            { path: "referral", label: "Refer & earn", icon: GiftIcon, description: "Invite teams and earn account credit.", ownerOnly: true, billingOnly: true },
+            { path: "billing", label: "Billing", icon: CreditCardIcon, description: "Plan, balance, invoices.", permission: "MANAGE_BILLING", billingOnly: true },
             { path: "limits", label: "Limits", icon: GaugeIcon, description: "Ask for a higher cap on mailboxes, contacts, seats or sends.", ownerOnly: true },
         ],
     },
     {
         label: "Developers",
         items: [
+            { path: "mailbox-sign-in", label: "Mailbox sign-in", icon: KeyRoundIcon, description: "Your own Google and Microsoft OAuth apps for mailbox sign-in.", permission: "MANAGE_EMAILS", partnerOnly: true },
             { path: "oauth-apps", label: "OAuth apps", icon: BoxesIcon, description: "Apps that connect via OAuth2, and the apps you've authorized.", permission: "MANAGE_API_KEYS" },
             { path: "webhooks", label: "Webhooks", icon: WebhookIcon, description: "Realtime HTTP callbacks for workspace events.", permission: "MANAGE_SETTINGS" },
             { path: "connections", label: "Connections", icon: PlugIcon, description: "External MCP servers that add tools to the AI.", permission: "MANAGE_SETTINGS" },
@@ -98,6 +104,7 @@ const GROUPS: SectionGroup[] = [
         label: "Advanced",
         items: [
             { path: "warmbly-cloud", label: "Warmbly Cloud", icon: CloudIcon, description: "Warm your mailboxes in the Warmbly pool.", permission: "MANAGE_SETTINGS", hostedLabel: "Linked instances", hostedDescription: "Self-hosted instances warming in this workspace." },
+            { path: "migrate", label: "Migrate from another tool", icon: ArrowRightLeftIcon, description: "Bring mailboxes, campaigns and leads over from Smartlead, Instantly and more.", permission: "MANAGE_CONTACTS" },
             { path: "data", label: "Data", icon: DatabaseIcon, description: "Export this workspace, or import one from another instance.", ownerOnly: true },
             { path: "danger", label: "Danger zone", icon: AlertOctagonIcon, description: "Irreversible actions." },
         ],
@@ -119,6 +126,10 @@ function SettingsLayoutInner() {
     const hosted = selfHosted === false;
     const canManageApiKeys = usePermission("MANAGE_API_KEYS");
     const canManageSettings = usePermission("MANAGE_SETTINGS");
+    const canManageEmails = usePermission("MANAGE_EMAILS");
+    // Off the Partnership plan, Mailbox sign-in stays listed while the workspace keeps an app it saved.
+    const oauthApps = useMailboxOAuthApps(canManageEmails && !access.partnership);
+    const keepsOAuthApps = (oauthApps.data?.data.length ?? 0) > 0;
     // Warmbly Cloud only shows where a link exists: an instance linked to it, or a hosted workspace with linked instances.
     const cloudStatus = useCloudLinkStatus(selfHosted === true && canManageSettings);
     const linkedInstances = usePoolLinkInstances(hosted && canManageSettings);
@@ -126,6 +137,8 @@ function SettingsLayoutInner() {
         ? (linkedInstances.data?.data ?? []).some((i) => !i.revoked_at)
         : !!(cloudStatus.data?.connected || cloudStatus.data?.legacy_connected);
     const canViewAnalytics = usePermission("VIEW_ANALYTICS");
+    const canManageBilling = usePermission("MANAGE_BILLING");
+    const canManageContacts = usePermission("MANAGE_CONTACTS");
     const restricted = useAccessRestricted();
     const navRef = React.useRef<HTMLElement>(null);
     const unsaved = useUnsavedRegistry();
@@ -190,9 +203,13 @@ function SettingsLayoutInner() {
                     (!s.ownerOnly || access.isOwner) &&
                     (!s.billingOnly || access.billing) &&
                     (s.path !== "warmbly-cloud" || hasCloudLink) &&
+                    (!s.partnerOnly || access.partnership || keepsOAuthApps) &&
+                    (s.permission !== "MANAGE_EMAILS" || canManageEmails) &&
                     (s.permission !== "MANAGE_API_KEYS" || canManageApiKeys) &&
                     (s.permission !== "MANAGE_SETTINGS" || canManageSettings) &&
-                    (s.permission !== "VIEW_ANALYTICS" || canViewAnalytics),
+                    (s.permission !== "VIEW_ANALYTICS" || canViewAnalytics) &&
+                    (s.permission !== "MANAGE_CONTACTS" || canManageContacts) &&
+                    (s.permission !== "MANAGE_BILLING" || canManageBilling || access.isOwner),
             )
             .map((s) =>
                 hosted && s.hostedLabel

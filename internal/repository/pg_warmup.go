@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -203,7 +204,7 @@ type WarmupRepository interface {
 	ListMailboxLoadingIncidents(ctx context.Context, now time.Time) ([]MailboxLoadingIncident, error)
 	GetWarmupStatistics(ctx context.Context, accountID uuid.UUID, from, to time.Time) ([]WarmupStatistic, error)
 	GetWarmupSummaries(ctx context.Context, accountIDs []uuid.UUID, from, to time.Time) (map[uuid.UUID]WarmupSummary, error)
-	GetOrCreateDailyStats(ctx context.Context, accountID uuid.UUID, date time.Time, targetVolume int) (*WarmupStatistic, error)
+	RecordDailyTarget(ctx context.Context, accountID uuid.UUID, localDay time.Time, targetVolume int) error
 
 	// Pool-wide placement analytics (admin overview)
 	PoolSpamPlacementRate(ctx context.Context, since time.Time) (float64, error)
@@ -892,9 +893,12 @@ func (r *warmupRepository) ListParticipantHealth(ctx context.Context) ([]models.
 	return out, rows.Err()
 }
 
+// Bounces here are hard bounces: one recorded as a full mailbox, a block or a
+// temporary failure is not about the address and stays out of the rate.
 const healthFeedbackCountsSQL = `SELECT
 	COUNT(*) FILTER (WHERE de.event_type = 'complaint') AS complaints,
-	COUNT(*) FILTER (WHERE de.event_type = 'bounce') AS bounces
+	COUNT(*) FILTER (WHERE de.event_type = 'bounce'
+		AND COALESCE(de.metadata->>'bounce_cause', '') NOT IN ('mailbox_full', 'reputation_block', 'transient')) AS bounces
 	FROM deliverability_events de JOIN tasks t ON t.id = de.task_id
 	WHERE t.email_account_id = $1 AND de.created_at >= $3 AND de.event_type IN ('complaint', 'bounce')`
 
@@ -1204,8 +1208,7 @@ func (r *warmupRepository) LastWarmupSendFailure(ctx context.Context, accountID 
 	if err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(f.Message, models.MailboxNotLoadedPrefix) {
-		f.Kind = models.WarmupFailureLoading
+	if f.Kind = models.WarmupSendFailureKind(f.Message); f.Kind == models.WarmupFailureLoading {
 		f.FirstFailureAt = &first
 	}
 	return f, nil
@@ -1324,7 +1327,7 @@ var poolAuthoritySQL = `
               WHERE l.organization_id = ea.organization_id AND l.email = lower(btrim(ea.email))
               AND l.cloud_health_state IN ('quarantined', 'blocked')
               AND (l.cloud_blocked_until IS NULL OR l.cloud_blocked_until > NOW()))
-          AND ` + selfExecutionGateSQL("ea.id")
+          AND NOT ` + instanceExecutedSQL("ea.id")
 
 const testSenderSQL = `(ea.test_mode IS NULL OR ea.test_mode='legacy' OR ea.test_mode='diagnostic' AND ea.test_send_enabled)`
 const testReceiveFlagsSQL = `(ea.test_mode IS NULL OR ea.test_mode='legacy' OR ea.test_mode='diagnostic' AND ea.test_receive_enabled)`
@@ -1371,7 +1374,7 @@ const partnerCandidateColumns = `
 // WarmupPartnerCandidates includes qualified cross-tier partners, already inbound-capped.
 func (r *warmupRepository) WarmupPartnerCandidates(ctx context.Context, poolType string, senderID uuid.UUID) ([]models.WarmupPartnerCandidate, error) {
 	// Eligibility and the sender's workspace in one round trip.
-	var eligible, senderExecuted bool
+	var eligible bool
 	var senderOrg *uuid.UUID
 	err := resultDB(ctx, r.db).QueryRow(ctx, `SELECT EXISTS (
  SELECT 1 FROM warmup_pool_participants wpp
@@ -1379,16 +1382,12 @@ func (r *warmupRepository) WarmupPartnerCandidates(ctx context.Context, poolType
  JOIN email_accounts ea ON ea.id = wpp.email_account_id
  WHERE ea.id = $1 AND wp.pool_type = $2
 	 AND wpp.participant_role='sender_receiver' AND `+testSenderSQL+`
-	AND `+poolEligibleSQL+`), (SELECT organization_id FROM email_accounts WHERE id = $1), `+instanceExecutedSQL("$1::uuid"), senderID, poolType).
-		Scan(&eligible, &senderOrg, &senderExecuted)
+	AND `+poolEligibleSQL+`), (SELECT organization_id FROM email_accounts WHERE id = $1)`, senderID, poolType).
+		Scan(&eligible, &senderOrg)
 	if err != nil || !eligible {
 		return nil, err
 	}
-	// Two instance-executed mailboxes never pair: neither side of the exchange would be observed by Cloud.
 	recipientSQL := partnerEligibleSQL
-	if senderExecuted {
-		recipientSQL += ` AND NOT ` + instanceExecutedSQL("ea.id")
-	}
 
 	cands, err := r.partnerCohort(ctx, partnerCandidateColumns+`
 		FROM warmup_pool_participants wpp
@@ -1452,7 +1451,12 @@ func (r *warmupRepository) WarmupPartnerCandidates(ctx context.Context, poolType
 		}
 		cands = append(cands, returns...)
 	}
-	return r.capPartnerCandidates(ctx, poolType, cands)
+	cands, err = r.capPartnerCandidates(ctx, poolType, cands)
+	if err != nil {
+		return nil, err
+	}
+	// An address that bounced this workspace's warmup is not mailed by it again.
+	return slices.DeleteFunc(cands, func(c models.WarmupPartnerCandidate) bool { return c.BouncedFrom(senderOrg) }), nil
 }
 
 type warmupExecutionExclusion struct{}
@@ -1553,33 +1557,23 @@ func (r *warmupRepository) GetWarmupStatistics(ctx context.Context, accountID uu
 	return stats, rows.Err()
 }
 
-// GetOrCreateDailyStats retrieves or creates daily warmup statistics
-func (r *warmupRepository) GetOrCreateDailyStats(ctx context.Context, accountID uuid.UUID, date time.Time, targetVolume int) (*WarmupStatistic, error) {
-	query := `
+// RecordDailyTarget stores a mailbox's local day's planned warmup volume on the row with that calendar date,
+// so each date carries exactly one day's plan however the local day straddles UTC midnight.
+func (r *warmupRepository) RecordDailyTarget(ctx context.Context, accountID uuid.UUID, localDay time.Time, targetVolume int) error {
+	_, err := resultDB(ctx, r.db).Exec(ctx, `
 		INSERT INTO warmup_statistics (email_account_id, date, emails_sent, emails_replied, target_volume)
-		VALUES ($1, DATE($2), 0, 0, $3)
+		VALUES ($1, $2::date, 0, 0, $3)
 		ON CONFLICT (email_account_id, date)
 		DO UPDATE SET target_volume = EXCLUDED.target_volume
-		RETURNING email_account_id, date, emails_sent, emails_replied, target_volume
-	`
-
-	stat := &WarmupStatistic{}
-	err := resultDB(ctx, r.db).QueryRow(ctx, query, accountID, date, targetVolume).Scan(
-		&stat.EmailAccountID,
-		&stat.Date,
-		&stat.EmailsSent,
-		&stat.EmailsReplied,
-		&stat.TargetVolume,
-	)
-
-	return stat, err
+		WHERE warmup_statistics.target_volume IS DISTINCT FROM EXCLUDED.target_volume`, accountID, localDay.Format(time.DateOnly), targetVolume)
+	return err
 }
 
 // CreateWarmupToken creates a warmup verification token
 func (r *warmupRepository) CreateWarmupToken(ctx context.Context, token *models.WarmupToken) error {
 	query := `
-		INSERT INTO warmup_tokens (token, task_id, sender_account_id, recipient_account_id, conversation_theme, content_source, conversation_id, conversation_turn, subject, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO warmup_tokens (token, task_id, sender_account_id, recipient_account_id, conversation_theme, content_source, conversation_id, conversation_turn, subject, expires_at, sequence_id, variant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
 	_, err := resultDB(ctx, r.db).Exec(ctx, query,
 		token.Token,
@@ -1592,6 +1586,8 @@ func (r *warmupRepository) CreateWarmupToken(ctx context.Context, token *models.
 		token.ConversationTurn,
 		token.Subject,
 		token.ExpiresAt,
+		token.SequenceID,
+		token.VariantID,
 	)
 	return err
 }
@@ -1701,18 +1697,23 @@ func (r *warmupRepository) acceptReceipt(ctx context.Context, q interface {
 	if token.ConsumedAt != nil || !token.ExpiresAt.After(time.Now()) {
 		return true, nil
 	}
-	var lineage, awaitingSend, retired bool
+	var lineage, awaitingSend, retired, settled bool
 	if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM warmup_tasks WHERE task_id=$1 AND lineage_version=1),
 		EXISTS(SELECT 1 FROM warmup_tasks w JOIN tasks sent ON sent.id=w.task_id
 		WHERE w.task_id=$1 AND w.lineage_version=1 AND (sent.status<>'completed' OR $2='')),
 		EXISTS(SELECT 1 FROM warmup_tokens WHERE token=$3 AND sent_retired_at IS NOT NULL)
-		OR EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND warmup_send_retired_at IS NOT NULL)`, token.TaskID, token.SentMessageID, token.Token).Scan(&lineage, &awaitingSend, &retired); err != nil {
+		OR EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND warmup_send_retired_at IS NOT NULL),
+		EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND status IN ('failed','cancelled'))`, token.TaskID, token.SentMessageID, token.Token).Scan(&lineage, &awaitingSend, &retired, &settled); err != nil {
 		return false, err
 	}
 	if retired {
 		return true, nil
 	}
 	if awaitingSend {
+		if settled {
+			// A failed or cancelled send is never confirmed later, so it gets now what expiry would give it.
+			return true, nil
+		}
 		return false, ErrWarmupDeliveryPending
 	}
 	if lineage && (strings.Trim(proof.MessageID, "<> \t") == "" ||
@@ -2048,7 +2049,7 @@ const WarmupRetirePerMailbox = 50
 // held by a mailbox that cannot act are never walked.
 func (r *warmupRepository) ListWarmupMailToRetire(ctx context.Context, defaultDays, limit int, skip []uuid.UUID) ([]WarmupMailToRetire, error) {
 	query := `
-		SELECT ea.user_id, ea.id, ` + actionWorkerSQL("ea") + `, wr.internal_id, wr.message_id,
+		SELECT ea.user_id, ea.id, ea.worker_id, wr.internal_id, wr.message_id,
 		       COALESCE(m.message_id, ''), ea.warmup_placement, ea.warmup_folder
 		FROM email_accounts ea
 		CROSS JOIN LATERAL (
@@ -2079,7 +2080,7 @@ func (r *warmupRepository) ListWarmupMailToRetire(ctx context.Context, defaultDa
 // Like the received side it starts from the mailboxes that can act.
 func (r *warmupRepository) ListWarmupSentCopiesToRetire(ctx context.Context, defaultDays, limit int, skip []uuid.UUID) ([]WarmupMailToRetire, error) {
 	query := `
-		SELECT ea.user_id, ea.id, ` + actionWorkerSQL("ea") + `, wt.token, wt.sent_message_id,
+		SELECT ea.user_id, ea.id, ea.worker_id, wt.token, wt.sent_message_id,
 		       COALESCE(m.message_id, ''), ea.warmup_placement, ea.warmup_folder
 		FROM email_accounts ea
 		CROSS JOIN LATERAL (
@@ -2268,7 +2269,7 @@ type WarmupTamperingToVerify struct {
 
 func (r *warmupRepository) ListUnverifiedDeletions(ctx context.Context, since time.Time, retryAfter time.Duration, limit int) ([]WarmupTamperingToVerify, error) {
 	rows, err := resultDB(ctx, r.db).Query(ctx, `
-		SELECT t.email_account_id, ea.user_id, `+actionWorkerSQL("ea")+`, t.message_id
+		SELECT t.email_account_id, ea.user_id, ea.worker_id, t.message_id
 		FROM warmup_tampering_events t
 		JOIN email_accounts ea ON ea.id = t.email_account_id
 		WHERE t.verified_at IS NULL

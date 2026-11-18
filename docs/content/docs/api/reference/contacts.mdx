@@ -245,7 +245,7 @@ Every endpoint that acts on a set of contacts (`PATCH /contacts`, `DELETE /conta
 }
 ```
 
-A filter selection that matches more than 250,000 contacts is refused with `selection_too_large` rather than truncated; narrow it and repeat. One that matches nothing is a `400`. `POST /integrations/connections/:id/push` and `POST /contacts/research/batch` accept the same shape and answer the same way, but still cap the resolved set at 500: a push calls the CRM once per contact inside the request, and each research run spends AI credits.
+A filter selection that matches more than 250,000 contacts is refused with `selection_too_large` rather than truncated; narrow it and repeat. One that matches nothing is a `400`. `POST /integrations/connections/:id/push` and `POST /contacts/research/batch` accept the same shape and answer the same way, but still cap the resolved set at 500: a push calls the CRM once per contact inside the request, and each research run is charged to the workspace balance.
 
 ## Bulk update contacts
 
@@ -539,7 +539,7 @@ Reads a draft under a mapping and writes nothing. `409` once the import has star
 }
 ```
 
-Every row lands in exactly one of `new`, `existing`, `duplicates_in_file`, `invalid`, or `conflicts` (an address the caller holds as a contact in another organization). `invalid_samples` lists up to 25 of the invalid and conflicting rows. `problem`, when present, is why starting would be refused as a whole: the plan's contact limit, or too many distinct labels.
+Every row lands in exactly one of `new`, `existing`, `duplicates_in_file`, `invalid`, or `conflicts` (an address the caller holds as a contact in another organization). `invalid_samples` lists up to 25 of the invalid and conflicting rows. `problem`, when present, is why starting would be refused as a whole: the workspace's contact limit ([`contact_limit_reached`](/api/error-codes/#contact_limit_reached)), or too many distinct labels.
 
 ### Start an import
 
@@ -961,6 +961,8 @@ Returns a `data` array and the standard `pagination` envelope. Paginate by passi
 
 `email_opened` and `email_clicked` carry `machine`: `true` when an automated fetcher did it rather than the person (a mail privacy proxy, a fetch inside the instance's automated-engagement window, which starts when the step is dispatched to a worker, several links followed within seconds). Per-link `email_clicked` events carry `machine_reason` (`prefetch`, `instant`, `scanner` or `burst`), and per-event `email_opened` rows carry it too (`prefetch`, `instant` or `scanner`); an open summarised from the lead alone carries only the flag. Both kinds carry an `origin` object when the event was logged: `client` when the user agent names a mail client (`Gmail`, `Apple Mail`, `Outlook`, `Yahoo Mail`, `Thunderbird` and others); `client_type`, `app` for an installed mail app or `webmail` for a browser (on a click, `app` only when a mail app made the request itself, and never `webmail`); `device_hidden: true` when the mailbox provider's image proxy fetched the email (Gmail, Yahoo Mail, HEY, Fastmail, Seznam, and Apple Mail Privacy Protection, whose user agent is just `Mozilla/5.0`); `device_type` (`desktop`, `mobile` or `tablet`), `os`, `browser`, `browser_version`; and `country_code`, `region`, `city` when the consumer could resolve them. A hidden device omits the device, operating system and browser, which would describe the proxy, and the location too, except the country and region Apple's relay keeps. The stripped WebKit user agent that Mail on a Mac and the new Outlook for Windows both send is reported as `client: "Apple Mail or Outlook"`, `client_type: "app"`, with no device. On a click, `browser` and `device_type` are where the link opened, and `client` is set only when a mail app made the request itself. Opens appear once per event, so a contact who opened from two devices has two rows. Automated clicks are on the feed for the record but never count the step as clicked. An `email_clicked` event carries `link` with the link's `id`, `url`, `label` (its anchor text), the `utm_*` parameters the URL carried, and the `user_agent`; every link in an email is tracked on its own, so each link clicked is its own event. Clicks recorded before per-link attribution have no `link`.
 
+A `deliverability` event carries `source` (`bounce`, `complaint` or `unsubscribe`), `provider` and `reason`, and a bounce carries `bounce_cause` once it has been classified: `recipient_invalid` (the address cannot receive mail, the only cause that suppresses it), `mailbox_full`, `reputation_block` or `transient`. A bounce without `bounce_cause` could not be placed; it did not suppress the address. See [suppression](/guides/deliverability/#built-in-protections).
+
 A `form_submitted` event carries `form_id` and `form_name`. A `page_hit` event is a page view on your own site from a browser tied to the contact through an email-link ticket (see [Website tracking](/guides/website-tracking/)); `subject` is the page title, or its path when the page has none, and `page_hit` carries the full view: `url`, `path`, `title`, `referrer`, `referrer_domain`, `landing` (the first view of a session), the `utm_*` parameters, `device_type`, `os`, `browser`, `browser_version`, `device_brand`, `language`, `timezone`, `screen_width`, `screen_height`, and `country_code`, `region`, `city` when known.
 
 Lifecycle events carry the name of what changed as it was at the time (`campaign_name`, or, for a label, `category_id` plus `category_title`), so a later rename or deletion does not rewrite history. A `contact_created` event carries `source` (`manual`, `campaign`, `import`, `sheet_sync`, `api`, `form`, `automation`, `ai_assistant`, or `unknown` for contacts that predate attribution) and `source_detail` (the file, campaign, sheet, form, automation or API key name). The same values are on the contact itself as `source`, `source_detail` and `first_seen_at`, and never change after creation.
@@ -1269,13 +1271,15 @@ Each condition names a `field`, an `operator`, and either a `value` (scalar oper
 | Kind | Fields | Operators | Value |
 | --- | --- | --- | --- |
 | text | `first_name`, `last_name`, `email`, `email_domain`, `phone`, `company`, `custom.*` | `equals`, `not_equals`, `contains`, `not_contains`, `starts_with`, `ends_with`, `is_empty`, `is_not_empty` | `value` string; comparisons ignore case |
-| enum | `source`, `verification_status`, `mail_host`, `esp_provider` | `in`, `not_in` | `values`, drawn from the field's `options`; `option_labels` names them for display |
-| bool | `subscribed`, `suppressed`, `is_catch_all` | `is_true`, `is_false` | none |
+| enum | `source`, `verification_status`, `mail_host`, `esp_provider`, `world_region`, `country`, `timezone` | `in`, `not_in` | `values`, drawn from the field's `options`; `option_labels` names them for display |
+| bool | `subscribed`, `suppressed`, `is_catch_all`, `location_known` | `is_true`, `is_false` | none |
 | date | `created_at`, `updated_at`, `last_sent_at`, `last_opened_at`, `last_clicked_at`, `last_replied_at` | `within_days`, `not_within_days` (`value` is a day count, 1 to 3650); `before`, `after` (`value` is `YYYY-MM-DD` or RFC 3339); `is_empty`, `is_not_empty` | see operators |
 | number | `campaign_count`, `emails_sent`, `emails_opened`, `emails_clicked`, `emails_replied`, `emails_bounced` | `equals`, `not_equals`, `gt`, `gte`, `lt`, `lte` | `value`, a whole number |
 | category | `category` | `in`, `not_in`, `is_empty`, `is_not_empty` | `values`, label ids |
 | campaign | `campaign` | `in`, `not_in`, `is_empty`, `is_not_empty` | `values`, campaign ids |
 | segment | `segment` | `in`, `not_in` | `values`, segment ids; at most five levels deep, no loops |
+
+The location fields read where Warmbly places the contact from its record (a timezone, state, city, country or location custom field, then the phone number, then a country-code email domain; see [how a contact's location is worked out](/guides/regions-and-timezones/#how-a-contacts-location-is-worked-out)). `world_region` is one of `north_america`, `latin_america`, `emea`, `apac`, or `none` for a contact with no country; `country` is an ISO 3166-1 alpha-2 code; `timezone` is an IANA name, `UTC`, or an `Etc/GMT` fixed offset; `location_known` is false for a contact nothing places. A contact is placed again within a minute of its record changing.
 
 Engagement counters add up every campaign the contact has been in, and opens count human opens only. Limits: 50 conditions per segment, 200 values per list condition, 200 segments per workspace. A condition that fails validation is rejected with `400` and a message naming the condition.
 
