@@ -30,6 +30,7 @@ export const VERIFICATION_VOCABULARY_LABELS: Record<string, string> = {
     zerobounce: "ZeroBounce",
     millionverifier: "MillionVerifier",
     cleanmylist: "CleanMyList",
+    reoon: "Reoon",
     neverbounce: "NeverBounce",
     bouncer: "Bouncer",
     kickbox: "Kickbox",

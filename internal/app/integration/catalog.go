@@ -316,6 +316,19 @@ func Catalog() []models.IntegrationCatalogEntry {
 				"Falls back to the built-in check when the service is unavailable",
 			},
 		},
+		{
+			Provider:   models.IntegrationReoon,
+			Name:       "Reoon",
+			Tagline:    "Verify contact addresses with your Reoon Email Verifier account.",
+			Category:   models.IntegrationCategoryVerification,
+			AuthMethod: string(models.IntegrationAuthAPIKey),
+			DocsURL:    "https://www.reoon.com/articles/api-documentation-of-reoon-email-verifier/",
+			Highlights: []string{
+				"Every new contact is checked automatically; nothing to run",
+				"Uses power-mode checks against your Reoon credits",
+				"Falls back to the built-in check when credits run out",
+			},
+		},
 	}
 }
 

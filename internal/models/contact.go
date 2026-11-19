@@ -389,7 +389,7 @@ type ContactVerificationResponse struct {
 // VerificationOverview is what Settings shows about address verification.
 type VerificationOverview struct {
 	// Provider is who checks this workspace's addresses: "builtin" or
-	// "millionverifier" or "cleanmylist".
+	// "millionverifier", "cleanmylist", or "reoon".
 	Provider string `json:"provider"`
 	// ConnectionID is the integration connection behind a paid provider.
 	ConnectionID *string `json:"connection_id,omitempty"`

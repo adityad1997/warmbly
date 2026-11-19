@@ -33,6 +33,18 @@ var vocabularies = map[string]map[string]ExternalVerdict{
 		"bad":        {Status: StatusInvalid},
 		"risky":      {Status: StatusRisky},
 	},
+	ProviderReoon: {
+		"safe":        {Status: StatusValid},
+		"valid":       {Status: StatusValid},
+		"catchall":    {Status: StatusRisky, SubStatus: SubStatusCatchAll},
+		"roleaccount": {Status: StatusRisky, SubStatus: SubStatusRole},
+		"inboxfull":   {Status: StatusRisky, SubStatus: SubStatusMailboxFull},
+		"invalid":     {Status: StatusInvalid},
+		"disabled":    {Status: StatusInvalid},
+		"disposable":  {Status: StatusInvalid, SubStatus: SubStatusDisposable},
+		"spamtrap":    {Status: StatusInvalid, SubStatus: SubStatusSpamTrap},
+		"unknown":     {Status: StatusUnknown},
+	},
 	"zerobounce": {
 		"valid":       {Status: StatusValid},
 		"invalid":     {Status: StatusInvalid},
@@ -133,7 +145,7 @@ var vocabularies = map[string]map[string]ExternalVerdict{
 // vocabProviderOrder decides which provider wins when several recognise every
 // value. Specific vocabularies first; the generic one last.
 var vocabProviderOrder = []string{
-	"zerobounce", ProviderMillionVerifier, "neverbounce", "emaillistverify",
+	"zerobounce", ProviderMillionVerifier, ProviderReoon, "neverbounce", "emaillistverify",
 	"debounce", "bouncer", "kickbox", "emailable", "clearout", ProviderCleanMyList, ProviderBuiltin,
 }
 
@@ -142,6 +154,7 @@ var vocabProviderOrder = []string{
 var vocabProviderAliases = map[string]string{
 	"cleanmylist":     ProviderCleanMyList,
 	"millionverifier": ProviderMillionVerifier, "mv": ProviderMillionVerifier,
+	"reoon": ProviderReoon, "reoonemailverifier": ProviderReoon,
 	"zerobounce": "zerobounce", "zb": "zerobounce",
 	"neverbounce": "neverbounce", "nb": "neverbounce",
 	"bouncer": "bouncer", "usebouncer": "bouncer",
@@ -158,6 +171,7 @@ var providerLabels = map[string]string{
 	ProviderBuiltin:         "Warmbly's built-in check",
 	ProviderMillionVerifier: "MillionVerifier",
 	ProviderCleanMyList:     "CleanMyList",
+	ProviderReoon:           "Reoon",
 	"zerobounce":            "ZeroBounce",
 	"neverbounce":           "NeverBounce",
 	"bouncer":               "Bouncer",

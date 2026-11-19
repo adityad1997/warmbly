@@ -106,6 +106,15 @@ const FIELDS_BY_PROVIDER: Record<string, FieldDef[]> = {
             helper: "API → API key in your MillionVerifier account. The key is checked before it is saved; one credit is spent per address verified.",
         },
     ],
+    reoon: [
+        {
+            key: "api_key",
+            label: "Reoon API key",
+            type: "password",
+            required: true,
+            helper: "From your Reoon Email Verifier dashboard. The key is checked before it is saved; power-mode checks use your instant and daily credits.",
+        },
+    ],
     close: [
         { key: "workspace", label: "Organization", placeholder: "Acme" },
         {

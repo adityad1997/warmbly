@@ -91,6 +91,7 @@ The active filters show as chips you can clear one at a time or all at once. Sea
 | Calendly, Cal.com | Meetings | minted inbound URL | Track booked, rescheduled, and canceled calls |
 | MillionVerifier | Verification | API key | Check every contact's address through your pay-as-you-go credits instead of the built-in probe |
 | CleanMyList | Verification | API key | Verify contacts using your CleanMyList plan allowance and credits |
+| Reoon | Verification | API key | Verify contacts with Reoon Email Verifier power-mode checks against your instant and daily credits |
 
 Slack does more than post: it brings the [AI assistant](/guides/ai-assistant/) into Slack, mirrors [Unibox](/guides/unibox/) replies into a channel where the team can reply, label and draft, and each member links their own Slack account. Its setup and settings have their own guide, [Slack](/guides/slack/).
 
@@ -121,6 +122,14 @@ The key is tested against your MillionVerifier account when you connect, so a mi
 CleanMyList does not expose a balance through its API, so Warmbly omits the credit counter. View your allowance and credits in CleanMyList. If verification fails, including an exhausted account, Warmbly uses the built-in check. Fix the account or reconnect a revoked key to restore verification.
 
 An account with nothing left is only visible when a check is refused, so Warmbly stops checking against it for 15 minutes rather than retrying every address. Topping up takes effect on the next pass after that. See the [CleanMyList API documentation](https://www.cleanmylist.io/developers) and [address verification](/guides/deliverability/#address-verification).
+
+### Connect Reoon
+
+1. Create an API key in your [Reoon Email Verifier](https://www.reoon.com/) dashboard.
+2. In Warmbly, open **Integrations → Reoon → Connect** and paste the key. Warmbly validates it with a free balance check and stores it encrypted.
+3. New contacts and re-verification requests use Reoon power-mode checks. Instant and daily credits both count toward the remaining balance shown on the connection. Verdicts such as `safe`, `catch_all`, `role_account`, `invalid`, and `spamtrap` map to Warmbly's statuses.
+
+When the balance runs out or the key is revoked, the connection is marked and the built-in check covers until it is fixed. See the [Reoon API documentation](https://www.reoon.com/articles/api-documentation-of-reoon-email-verifier/) and [address verification](/guides/deliverability/#address-verification).
 
 ### One verifier at a time
 
