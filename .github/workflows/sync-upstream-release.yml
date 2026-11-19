@@ -82,7 +82,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream "$UPSTREAM_URL"
-          git fetch upstream "refs/tags/${TAG}:refs/tags/upstream-${TAG}"
+          # --no-tags: a plain tag fetch also auto-creates refs/tags/$TAG locally
+          # (follow-tags), so `git tag -a $TAG` later fails with "already exists"
+          # and the local tag would point at upstream, not our merge commit.
+          git fetch --no-tags upstream "refs/tags/${TAG}:refs/tags/upstream-${TAG}"
 
           if ! git merge "upstream-${TAG}" -m "chore: merge upstream ${TAG}"; then
             git merge --abort || true
@@ -126,6 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           git push origin HEAD:main
+          git tag -d "$TAG" 2>/dev/null || true
           git tag -a "$TAG" -m "$TAG"
           git push origin "refs/tags/${TAG}"
           echo "Pushed main and tag $TAG; release.yml should build images next"
