@@ -32,8 +32,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=$(gh api "repos/${UPSTREAM_REPO}/releases" --paginate \
-            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name')
+          # releases/latest is GitHub's newest non-draft, non-prerelease.
+          # Do not use --paginate with [0]: jq runs per page and concatenates
+          # every page's first stable tag into a multiline value that breaks
+          # GITHUB_OUTPUT (e.g. v0.8.9\nv0.5.4).
+          tag=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')
           if [ -z "$tag" ] || [ "$tag" = "null" ]; then
             echo "No stable upstream release found"
             exit 1
