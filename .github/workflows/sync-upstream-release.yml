@@ -1,0 +1,128 @@
+# Fork-only: keep adityad1997/warmbly current with warmbly/warmbly releases.
+# Do not open this as a PR against upstream. A successful merge + tag push
+# triggers release.yml, which rebuilds ghcr.io/<owner>/warmbly images.
+
+name: Sync upstream release
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: warmbly/warmbly
+  UPSTREAM_URL: https://github.com/warmbly/warmbly.git
+
+jobs:
+  sync:
+    name: Sync latest stable upstream release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve latest upstream stable tag
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api "repos/${UPSTREAM_REPO}/releases" --paginate \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name')
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "No stable upstream release found"
+            exit 1
+          fi
+          if printf '%s' "$tag" | grep -q '-'; then
+            echo "Refusing tag with a hyphen (would be a prerelease channel): $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream stable release: $tag"
+
+      - name: Skip when this fork already has the tag
+        id: skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${{ github.repository }}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists on ${{ github.repository }}; nothing to do"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG is not on this fork yet"
+          fi
+
+      - name: Checkout
+        if: steps.skip.outputs.already != 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Merge upstream tag into main
+        if: steps.skip.outputs.already != 'true'
+        id: merge
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream "refs/tags/${TAG}:refs/tags/upstream-${TAG}"
+
+          if ! git merge "upstream-${TAG}" -m "chore: merge upstream ${TAG}"; then
+            git merge --abort || true
+            title="Upstream sync conflict: ${TAG}"
+            body_file=$(mktemp)
+            {
+              echo "Automatic merge of \`${UPSTREAM_REPO}@${TAG}\` into \`main\` failed."
+              echo
+              echo "Resolve locally (see \`docs/fork-upstream-sync.md\`):"
+              echo
+              echo '```bash'
+              echo "git fetch upstream"
+              echo "git checkout main"
+              echo "git merge ${TAG}"
+              echo "# fix conflicts, keep fork patches"
+              echo "git add -A && git commit"
+              echo "git push origin main"
+              echo "git tag -a ${TAG} -m \"${TAG}\""
+              echo "git push origin ${TAG}"
+              echo '```'
+              echo
+              echo "After the tag push, \`release.yml\` rebuilds GHCR images for this fork. Apply on the VPS with the Update dialog."
+            } >"$body_file"
+            existing=$(gh issue list --repo "${{ github.repository }}" \
+              --state open --search "in:title Upstream sync conflict: ${TAG}" --json number -q '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              echo "Conflict issue already open: #$existing"
+            else
+              gh issue create --repo "${{ github.repository }}" --title "$title" --body-file "$body_file"
+            fi
+            rm -f "$body_file"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push main and release tag
+        if: steps.skip.outputs.already != 'true' && steps.merge.outputs.merged == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/${TAG}"
+          echo "Pushed main and tag $TAG; release.yml should build images next"
