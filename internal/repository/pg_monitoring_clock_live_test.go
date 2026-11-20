@@ -122,7 +122,7 @@ func TestLiveMonitoringDatabaseClockWarningSemantics(t *testing.T) {
 	worker := monitoringWorkerNode(t, pool, "worker", true, nil)
 	f.exec(`UPDATE email_accounts SET status='active',worker_id=$2 WHERE id=$1`, f.account, worker)
 	now := monitoringWorkerClock(t, pool)
-	stale, future, expired := now.Add(-time.Hour), now.Add(time.Hour), now.Add(-time.Second)
+	stale, future, expired := now.Add(-defaultSyncStaleAfter-time.Hour), now.Add(time.Hour), now.Add(-time.Second)
 	r := NewMonitoringRepository(monitoringClockPool(t, pool, &monitoringClockTrace{}, monitoringScope{nodes: []uuid.UUID{worker}, orgs: []uuid.UUID{f.org}}))
 	for _, tc := range []struct {
 		name, provider, metric string
@@ -208,9 +208,9 @@ func TestLiveMonitoringDatabaseClockPredicateBoundaries(t *testing.T) {
 		{"sync just past", "sync", "sync_future_clock", -time.Microsecond, 0},
 		{"sync at reference", "sync", "sync_future_clock", 0, 0},
 		{"sync one microsecond future", "sync", "sync_future_clock", time.Microsecond, 1},
-		{"sync exactly stale cutoff", "sync", "sync_stale", -20 * time.Minute, 0},
-		{"sync just outside cutoff", "sync", "sync_stale", -20*time.Minute - time.Microsecond, 1},
-		{"sync just inside cutoff", "sync", "sync_stale", -20*time.Minute + time.Microsecond, 0},
+		{"sync exactly stale cutoff", "sync", "sync_stale", -defaultSyncStaleAfter, 0},
+		{"sync just outside cutoff", "sync", "sync_stale", -defaultSyncStaleAfter - time.Microsecond, 1},
+		{"sync just inside cutoff", "sync", "sync_stale", -defaultSyncStaleAfter + time.Microsecond, 0},
 		{"hold exactly reference", "sync", "sync_hold_org_daily", 0, 0},
 		{"hold just expired", "sync", "sync_hold_org_daily", -time.Microsecond, 0},
 		{"hold one microsecond active", "sync", "sync_hold_org_daily", time.Microsecond, 1},
@@ -275,7 +275,7 @@ func TestLiveMonitoringDatabaseClockSingleSnapshot(t *testing.T) {
 	f := newWarmupUsageFixture(t, pool)
 	worker := monitoringWorkerNode(t, pool, "worker", true, nil)
 	f.exec(`UPDATE email_accounts SET status='active',worker_id=$2 WHERE id=$1`, f.account, worker)
-	old := monitoringWorkerClock(t, pool).Add(-time.Hour)
+	old := monitoringWorkerClock(t, pool).Add(-defaultSyncStaleAfter - time.Hour)
 	f.exec(`INSERT INTO email_sync_state(email_id,user_id,last_synced_at) VALUES($1,$2,$3)`, f.account, f.user, old)
 	trace := &monitoringClockTrace{}
 	ro := monitoringClockPool(t, pool, trace, monitoringScope{nodes: []uuid.UUID{worker}, orgs: []uuid.UUID{f.org}})
