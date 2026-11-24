@@ -88,6 +88,7 @@ type Pricing struct {
 	Mailboxes []MailboxPrice `json:"mailboxes"`
 	Limits    Limits         `json:"limits"`
 	Sending   *SendingPrices `json:"sending,omitempty"`
+	Social    *SocialPrices  `json:"social,omitempty"`
 }
 
 // MinYears is the shortest registration a TLD takes, 1 when it is not listed.
@@ -441,12 +442,24 @@ const (
 	ConnectToken      = "token"
 	ConnectDelegation = "delegation"
 	ConnectPassword   = "password"
+	// ConnectOAuth (Google, with GoogleDelegation.SignInClientID registered): the mail vendor's team
+	// signs the mailbox in through a link the partner registers (PutMailboxSignInLink); the partner
+	// reports it connected (MailboxSignedIn) and it is ready.
+	ConnectOAuth = "oauth"
 )
 
 // Connection says how the partner can reach a mailbox.
 type Connection struct {
 	Method string `json:"method"`
 	Ready  bool   `json:"ready"`
+	// SignIn is set only for ConnectOAuth.
+	SignIn *ConnectionSignIn `json:"sign_in,omitempty"`
+}
+
+// ConnectionSignIn is an oauth mailbox's sign-in: the registered link's expiry (nil when none) and when it was signed in.
+type ConnectionSignIn struct {
+	LinkExpiresAt *time.Time `json:"link_expires_at"`
+	SignedInAt    *time.Time `json:"signed_in_at"`
 }
 
 // Mailbox is one Google Workspace or Microsoft 365 mailbox.
@@ -502,6 +515,8 @@ type Credentials struct {
 type GoogleDelegation struct {
 	ClientID string   `json:"client_id,omitempty"`
 	Scopes   []string `json:"scopes"`
+	// SignInClientID is the OAuth web client the mail vendor signs Google mailboxes in to (ConnectOAuth).
+	SignInClientID string `json:"sign_in_client_id,omitempty"`
 }
 
 // AccessToken is a brokered Google access token for one mailbox, valid at most an hour.
@@ -584,6 +599,14 @@ const (
 	EventDomainDisconnected = "domain.disconnected"
 	// EventSendingUpdated is GraphKit's own sending service, which the store does not use.
 	EventSendingUpdated = "sending.updated"
+	// Social accounts: the workspace mode, connect sessions, accounts, actions and conversations.
+	EventSocialUpdated            = "social.updated"
+	EventSocialConnectionUpdated  = "social.connection.updated"
+	EventSocialAccountUpdated     = "social.account.updated"
+	EventSocialActionUpdated      = "social.action.updated"
+	EventSocialMessageReceived    = "social.message.received"
+	EventSocialMessageSent        = "social.message.sent"
+	EventSocialInvitationAccepted = "social.invitation.accepted"
 )
 
 // Pagination is the list cursor.
